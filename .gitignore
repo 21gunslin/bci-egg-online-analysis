@@ -1,0 +1,25 @@
+# Local recordings, patient information and generated analysis outputs
+results/
+data/
+uploads/
+*.bdf
+*.edf
+*.gdf
+*.xlsx
+*.xls
+*.csv
+*.npz
+*.npy
+*.docx
+*.pptx
+*.zip
+*.log
+*.pid
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+Thumbs.db
