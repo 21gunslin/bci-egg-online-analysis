@@ -20,6 +20,7 @@ uploads/
 __pycache__/
 *.py[cod]
 .venv/
+.venv-*/
 venv/
 .DS_Store
 Thumbs.db

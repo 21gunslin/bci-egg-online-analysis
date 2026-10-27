@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import platform
+from importlib.metadata import version as package_version
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ from scipy.stats import kurtosis, skew
 
 
 SUPPORTED_EXTENSIONS = (".bdf", ".edf", ".gdf")
+PIPELINE_VERSION = "0.2.0"
 PathLike = str | Path
 ProgressCallback = Callable[[float, str], None]
 
@@ -162,10 +165,26 @@ def _is_eeg_like(label: str, physical_unit: str) -> bool:
         return False
     if normalized.startswith(("X", "EMG", "EOG", "ECG", "EKG", "ACC", "GYRO")):
         return False
-    unit = _clean_text(physical_unit).lower()
-    if unit in {"uv", "µv", "μv", "microvolt", "microvolts", "v", "mv"}:
-        return True
-    return True
+    # Voltage units alone cannot establish that a channel is EEG (e.g. EHG).
+    return bool(re.fullmatch(
+        r"(?:FP[12Z]|AF[1-8Z]|F[1-9Z]|FC[1-6Z]|FT[7-9]|C[1-6Z]|"
+        r"CP[1-6Z]|TP[7-9]|P[1-9Z]|PO[1-8Z]|O[12Z]|T[1-9])", normalized
+    ))
+
+
+def voltage_to_uv(data: np.ndarray, units: Sequence[str]) -> np.ndarray:
+    """Convert declared voltage units to µV; never infer a device correction."""
+    factors = {"v": 1e6, "mv": 1e3, "uv": 1.0, "µv": 1.0, "μv": 1.0,
+               "nv": 1e-3, "microvolt": 1.0, "microvolts": 1.0}
+    values = _as_float_array(data).copy()
+    if len(units) != len(values):
+        raise ValueError("通道数量与电压单位数量不一致。")
+    for index, unit in enumerate(units):
+        key = _clean_text(unit).lower()
+        if key not in factors:
+            raise ValueError(f"未知电压单位 {unit!r}；请确认文件单位，不能按 µV 猜测。")
+        values[index] *= factors[key]
+    return values
 
 
 def _choose_channels(
@@ -187,8 +206,7 @@ def _choose_channels(
             index for index, label in enumerate(labels)
             if not _is_annotation_label(label) and _is_eeg_like(label, units[index])
         ]
-        if indices:
-            return indices, [labels[index] for index in indices]
+        return indices, [labels[index] for index in indices]
 
     indices = [index for index, label in enumerate(labels) if not _is_annotation_label(label)]
     return indices, [labels[index] for index in indices]
@@ -263,11 +281,8 @@ class _EDFReader:
     @staticmethod
     def _parse_float_field(raw: bytes, fallback: float) -> float:
         text = _parse_ascii(raw)
-        match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
-        if not match:
-            return fallback
         try:
-            return float(match.group())
+            return float(text)
         except ValueError:
             return fallback
 
@@ -278,6 +293,8 @@ class _EDFReader:
                 raise ValueError("文件头不足 256 字节，无法按 EDF/BDF 结构读取。")
 
             reserved = _parse_ascii(fixed[192:236])
+            if reserved.startswith(("EDF+D", "BDF+D")):
+                raise ValueError("不连续 EDF/BDF 需要保留时间注释，请使用 MNE 读取；不能按连续信号拼接。")
             version_raw = fixed[0:8]
             version = _parse_ascii(version_raw)
             is_bdf = (
@@ -307,6 +324,8 @@ class _EDFReader:
             except ValueError:
                 record_duration = 0.0
             record_duration = self._parse_float_field(fixed[244:252], record_duration)
+            if not np.isfinite(record_duration) or record_duration <= 0:
+                raise ValueError("EDF/BDF 记录时长无效，不能猜测采样率。")
             try:
                 signal_count = int(_parse_ascii(fixed[252:256]) or 0)
             except ValueError as error:
@@ -476,187 +495,52 @@ class _EDFReader:
 
 
 class _GDFReader:
-    """GDF 2.x 读取器；信号数据按 IEEE-754 浮点或有符号整数解码。"""
-
-    SAMPLE_DTYPES = {
-        1: "i1", 2: "<i2", 4: "<i4", 8: "<i8",
-        40: "<f4", 80: "<f8",
-    }
+    """Delegate GDF binary headers, units and event timing to MNE's public reader."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
 
     @classmethod
     def can_read(cls, path: Path) -> bool:
+        with Path(path).open("rb") as handle:
+            return handle.read(8).startswith(b"GDF")
+
+    def read(self, max_channels: int = 128):
         try:
-            with path.open("rb") as handle:
-                version = handle.read(8)
-            return version.startswith(b"GDF")
-        except OSError:
-            return False
-
-    @staticmethod
-    def _read_typed(block: bytes, dtype: str, count: int) -> np.ndarray:
-        return np.frombuffer(block, dtype=np.dtype(dtype), count=count)
-
-    def read(self, max_channels: int = 128) -> tuple[np.ndarray, list[str], list[str], HeaderInfo, list[str]]:
-        with self.path.open("rb") as handle:
-            fixed = handle.read(256)
-            if len(fixed) < 256 or not fixed.startswith(b"GDF"):
-                raise ValueError("不是有效的 GDF 文件。")
-            version = _parse_ascii(fixed[0:8])
-            patient = _parse_ascii(fixed[8:88])
-            recording = _parse_ascii(fixed[88:168])
-            start_date = _parse_ascii(fixed[168:176])
-            start_time = _parse_ascii(fixed[176:184])
-            header_bytes = int(_parse_ascii(fixed[184:192]) or 0)
-            signal_count = int(_parse_ascii(fixed[252:256]) or 0)
-            if signal_count <= 0 or header_bytes < 256:
-                raise ValueError("GDF 头部信息无效。")
-
-            signal_header = handle.read(256 * signal_count)
-            if len(signal_header) != 256 * signal_count:
-                raise ValueError("GDF 信号头被截断。")
-
-            fields = [
-                ("label", 16), ("transducer", 80), ("physical_dimension", 8),
-                ("physical_minimum", 8), ("physical_maximum", 8),
-                ("digital_minimum", 8), ("digital_maximum", 8),
-                ("prefilter", 80), ("samples_per_record", 8), ("type", 2), ("size", 2),
-                ("reserved", 28),
-            ]
-            parsed: dict[str, list[str]] = {}
-            for name, width in fields:
-                parsed[name] = [
-                    _parse_ascii(signal_header[start:start + width])
-                    for start in range(0, signal_count * 256, 256)
-                ]
-
-            labels = [_clean_text(value) for value in parsed["label"]]
-            dimensions = [_clean_text(value) for value in parsed["physical_dimension"]]
-            physical_min = np.array([_parse_number(value) for value in parsed["physical_minimum"]], dtype=float)
-            physical_max = np.array([_parse_number(value) for value in parsed["physical_maximum"]], dtype=float)
-            digital_min = np.array([_parse_number(value) for value in parsed["digital_minimum"]], dtype=float)
-            digital_max = np.array([_parse_number(value) for value in parsed["digital_maximum"]], dtype=float)
-            samples = np.array([int(_parse_number(value, 1)) for value in parsed["samples_per_record"]], dtype=int)
-            type_codes = np.array([int(_parse_number(value, 0)) for value in parsed["type"]], dtype=int)
-            sizes = np.array([int(_parse_number(value, 0)) for value in parsed["size"]], dtype=int)
-
-            handle.seek(header_bytes)
-            body = handle.read()
-            record_items = int(samples.sum())
-            if record_items <= 0:
-                raise ValueError("GDF 每记录采样点数无效。")
-            record_bytes = int(
-                sum(samples[i] * (sizes[i] if sizes[i] > 0 else 1) for i in range(signal_count))
-            )
-            if record_bytes <= 0:
-                raise ValueError("GDF 每记录字节数无效。")
-            record_count = len(body) // record_bytes
-            if record_count <= 0:
-                raise ValueError("未读取到 GDF 数据记录。")
-            body = body[: record_count * record_bytes]
-
-            annotation_indices = [
-                index for index, code in enumerate(type_codes)
-                if labels[index] and _is_annotation_label(labels[index])
-            ]
-            annotations = _GDFReader._decode_annotations(body, annotation_indices, samples, sizes, record_count)
-            eeg_indices = [index for index in range(signal_count) if index not in annotation_indices]
-            if not eeg_indices:
-                raise ValueError("GDF 文件没有可用于脑电分析的数据通道。")
-            if len(eeg_indices) > max_channels:
-                eeg_indices = eeg_indices[:max_channels]
-
-            item_offsets = np.concatenate(([0], np.cumsum(samples)))
-            byte_offsets = np.concatenate(([0], np.cumsum(sizes)))
-            channels: list[np.ndarray] = []
-            eeg_labels: list[str] = []
-            eeg_units: list[str] = []
-            notes: list[str] = []
-            for index in eeg_indices:
-                code = int(type_codes[index])
-                size = int(sizes[index]) if sizes[index] > 0 else int(self.SAMPLE_DTYPES.get(code, 1))
-                dtype_name = self.SAMPLE_DTYPES.get(code)
-                if dtype_name is None:
-                    notes.append(f"通道 {labels[index] or index + 1} 使用不支持的数据类型 {code}，已跳过。")
-                    continue
-                expected_size = np.dtype(dtype_name).itemsize
-                if size and size != expected_size:
-                    dtype_name = self.SAMPLE_DTYPES.get(size)
-                    if dtype_name is None:
-                        notes.append(f"通道 {labels[index] or index + 1} 的元素大小 {size} 不受支持，已跳过。")
-                        continue
-
-                pieces: list[np.ndarray] = []
-                for record in range(record_count):
-                    start = record * record_bytes + byte_offsets[index]
-                    count = int(samples[index])
-                    pieces.append(np.frombuffer(body, dtype=np.dtype(dtype_name), count=count, offset=start))
-                values = np.concatenate(pieces).astype(np.float64)
-
-                scale_range = digital_max[index] - digital_min[index]
-                if abs(scale_range) < 1e-15 or not np.isfinite(physical_min[index]) or not np.isfinite(physical_max[index]):
-                    channels.append(values)
-                else:
-                    gain = (physical_max[index] - physical_min[index]) / scale_range
-                    offset = physical_min[index] - digital_min[index] * gain
-                    channels.append(values * gain + offset)
-                eeg_labels.append(labels[index] or f"CH{index + 1}")
-                eeg_units.append(dimensions[index])
-
-            if not channels:
-                raise ValueError("GDF 没有可解码的数值通道。")
-
-            duration_seconds = float(record_count)
+            import mne
+        except ImportError as error:
+            raise ValueError("GDF 读取需要可选 MNE 依赖：python -m pip install -r requirements-mne.txt") from error
+        raw = mne.io.read_raw_gdf(self.path, preload=False, verbose="ERROR")
+        try:
+            indices = [i for i, kind in enumerate(raw.get_channel_types()) if kind == "eeg"]
+            if not indices:
+                raise ValueError("MNE 没有识别出 GDF EEG 通道，请核对通道类型。")
+            if len(indices) > max_channels:
+                raise ValueError("GDF EEG 通道数超过配置上限，不能静默截断。")
+            # MNE returns EEG voltages in SI volts, regardless of on-disk unit.
+            data = raw.get_data(picks=indices) * 1e6
+            labels = [raw.ch_names[i] for i in indices]
+            units = ["µV"] * len(labels)
+            fs = float(raw.info["sfreq"])
+            annotations = [f"{onset:g}s / {duration:g}s: {description}" for onset, duration, description
+                           in zip(raw.annotations.onset, raw.annotations.duration, raw.annotations.description)]
+            date = raw.info.get("meas_date")
             header = HeaderInfo(
-                file_name=self.path.name,
-                file_path=str(self.path),
-                format="GDF",
-                version=version,
-                patient=patient,
-                recording=recording,
-                start_date=start_date,
-                start_time=start_time,
-                channel_count=signal_count,
-                signal_count=len(channels),
-                data_records=record_count,
-                record_duration=1.0,
-                duration_seconds=duration_seconds,
-                physical_minimum=float(np.nanmin(physical_min[eeg_indices])) if len(eeg_indices) else math.nan,
-                physical_maximum=float(np.nanmax(physical_max[eeg_indices])) if len(eeg_indices) else math.nan,
-                digital_minimum=int(np.nanmin(digital_min[eeg_indices])) if len(eeg_indices) else 0,
-                digital_maximum=int(np.nanmax(digital_max[eeg_indices])) if len(eeg_indices) else 0,
-                annotations=len(annotations),
-                reader="GDF 2.x 读取器",
-                notes=notes,
-                sampling_rate=(float(np.median(samples[eeg_indices])) if len(eeg_indices) else 0.0),
+                file_name=self.path.name, file_path=str(self.path), format="GDF",
+                version="MNE reader", patient="", recording="",
+                start_date=date.strftime("%d.%m.%y") if date else "",
+                start_time=date.strftime("%H.%M.%S") if date else "",
+                channel_count=len(raw.ch_names), signal_count=len(labels), data_records=0,
+                record_duration=0.0, duration_seconds=raw.n_times/fs,
+                physical_minimum=float("nan"), physical_maximum=float("nan"),
+                digital_minimum=0, digital_maximum=0, annotations=len(annotations),
+                reader=f"MNE {mne.__version__} read_raw_gdf",
+                notes=["GDF EEG 单位由 MNE 转为 V 后统一换算为 µV。", "事件保留为带时间文本；未自动建立 ERP epochs。"],
+                sampling_rate=fs,
             )
-            return np.vstack(channels), eeg_labels, eeg_units, header, annotations
-
-    @staticmethod
-    def _decode_annotations(
-        body: bytes,
-        indices: list[int],
-        samples: np.ndarray,
-        sizes: np.ndarray,
-        record_count: int,
-    ) -> list[str]:
-        events: list[str] = []
-        item_offsets = np.concatenate(([0], np.cumsum(samples)))
-        byte_offsets = np.concatenate(([0], np.cumsum(sizes)))
-        for index in indices:
-            for record in range(record_count):
-                start = record * int(sizes.sum()) + int(byte_offsets[index])
-                count = int(samples[index])
-                try:
-                    raw = np.frombuffer(body, dtype=np.uint8, count=count, offset=start)
-                    text = bytes(raw).decode("latin-1", errors="ignore").replace("\x00", " ")
-                except (ValueError, IndexError):
-                    continue
-                for match in re.finditer(r"(\d+[.,]\d+)\x14([^\x14\x00]{0,80})", text):
-                    events.append(f"{match.group(1)}: {match.group(2).strip()}")
-        return events
+            return data, labels, units, header, annotations
+        finally:
+            raw.close()
 
 
 def read_eeg_file(
@@ -692,14 +576,11 @@ def read_eeg_file(
         chosen_labels = chosen_labels[:max_channels]
     data = data[indices]
     units = [units[index] for index in indices]
-    if any(unit.lower() not in {"uv", "µv", "μv", "microvolt", "microvolts", "v", "mv"} for unit in units):
-        header.notes.append("部分分析通道物理单位非标准 µV；按文件标度原样换算。")
-
     header.analysis_channel_count = len(chosen_labels)
+    header.channel_labels = chosen_labels
+    header.channel_units = units
     if not np.isfinite(data).all():
-        finite_ratio = float(np.isfinite(data).mean())
-        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-        header.notes.append(f"检测到非有限采样值，已置零；有限值比例 {finite_ratio:.2%}。")
+        raise ValueError("记录包含非有限采样值，请先标记坏段；不能静默置零后继续分析。")
     return data, chosen_labels, units, header, annotations
 
 
@@ -728,15 +609,6 @@ def _estimate_sampling_rate(
         fs = samples / header.duration_seconds
         return float(fs), ["采样率由总时长与采样点数推算。"]
 
-    if data.shape[1] >= 4:
-        try:
-            _, psd = signal.welch(data[0], nperseg=min(4096, data.shape[1]))
-            if psd.size > 1:
-                candidate = float(np.argmax(psd[1:]) + 1) * 1.0
-                notes.append(f"Welch 谱估计采样率约 {candidate:g} Hz，请人工确认。")
-                return max(candidate, 1.0), notes
-        except ValueError:
-            pass
     raise ValueError("无法确定采样率；请在分析设置中手动指定。")
 
 
@@ -770,8 +642,9 @@ def _bandpass(data: np.ndarray, fs: float, low_hz: float, high_hz: float) -> np.
             "分析采样率必须高于最高截止频率的 2 倍。"
         )
     # SOS is numerically better conditioned than a high-order b/a polynomial.
-    # sosfiltfilt applies the designed Butterworth band-pass forward and backward,
-    # retaining zero phase and doubling the effective order.
+    # N=4 is the Butterworth prototype order. Band-pass transformation gives
+    # single-pass order 8; forward-backward filtering gives effective order 16.
+    # The composite amplitude response is |H|² (cutoffs are about -6 dB).
     sos = signal.butter(4, [low_hz, high_hz], btype="bandpass", fs=fs, output="sos")
     return signal.sosfiltfilt(sos, data, axis=1)
 
@@ -810,11 +683,20 @@ def preprocess_eeg(
         indices = [i for i, label in enumerate(labels) if _normalize_channel_name(label) in wanted]
         if indices:
             data, labels, units = data[indices], [labels[i] for i in indices], [units[i] for i in indices]
+        else:
+            raise ValueError("指定通道不存在。")
+
+    data = voltage_to_uv(data, units)
+    source_units = units.copy()
+    units = ["µV"] * len(labels)
 
     if data.shape[1] < int(source_fs):
         raise ValueError(f"有效数据不足 1 秒（{data.shape[1]} 采样点 @ {source_fs:g} Hz）。")
 
-    notes = list(fs_notes)
+    notes = list(fs_notes) + [
+        "电压按文件头声明单位统一为 µV；未推断设备量纲误标或施加额外倍率。",
+        "保留采集参考；文件头未验证参考电极，未自动重参考或推断电极坐标。",
+    ]
     progress(0.10, "重采样与带通滤波")
     data, fs, resample_notes = _downsample(data, source_fs, settings.target_fs)
     notes.extend(resample_notes)
@@ -822,7 +704,7 @@ def preprocess_eeg(
     data = _bandpass(data, fs, 0.5, filter_high_hz)
     notes.append(
         f"已施加四阶 Butterworth 带通滤波（0.5–{filter_high_hz:g} Hz），"
-        "采用 SOS 双向零相位滤波（等效阶数加倍）。"
+        "采用 SOS 双向零相位滤波；N=4 原型的带通单程为8阶，双向有效16阶；合成幅频响应为 |H|²。"
     )
     data, notch_notes = _apply_notches(data, fs, settings.notches)
     notes.extend(notch_notes)
@@ -839,7 +721,7 @@ def preprocess_eeg(
     kept_units = [units[index] for index in keep]
 
     progress(0.28, "分段与伪迹剔除")
-    clean_epochs_data, epochs = clean_epochs(data, settings)
+    clean_epochs_data, epochs = clean_epochs(data, settings, fs=fs)
     keep_ratio = float(np.mean(epochs)) if epochs.size else 0.0
     if clean_epochs_data.shape[2] == 0 or keep_ratio < settings.min_keep_ratio:
         guidance = (
@@ -855,9 +737,12 @@ def preprocess_eeg(
     # routines. The earlier 3-D array leaked an epoch dimension into Welch and
     # other feature calculations, causing incorrect shapes or broadcasting.
     clean = clean_epochs_data.reshape(clean_epochs_data.shape[0], -1)
+    kept_epoch_indices = np.flatnonzero(epochs)
+    original_epoch_samples = int(round(settings.epoch_seconds * fs))
+    notes.append("保留片段拼接用于探索性特征；跨剔除间隙的谱/时频/相位及导数可能受边界影响，不能视为连续原始时间。")
 
     channel_records = []
-    for original_index, kept_index in enumerate(keep):
+    for original_index in keep:
         channel_records.append({
             "原始序号": original_index + 1,
             "通道": labels[original_index],
@@ -883,6 +768,10 @@ def preprocess_eeg(
         "source_fs": float(source_fs),
         "channel_names": kept_labels,
         "channel_units": kept_units,
+        "source_channel_units": source_units,
+        "reference": "acquisition_reference_unverified",
+        "kept_epoch_indices": kept_epoch_indices,
+        "original_epoch_samples": original_epoch_samples,
         "raw_channel_names": labels,
         "channel_records": channel_records,
         "keep_indices": keep,
@@ -919,12 +808,12 @@ def channel_qc(
     return keep, {"std": std, "saturated": saturated, "correlation": correlation}
 
 
-def clean_epochs(data: np.ndarray, settings: AnalysisSettings) -> tuple[np.ndarray, np.ndarray]:
+def clean_epochs(data: np.ndarray, settings: AnalysisSettings, fs: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """2 秒分段，按幅值与方差异常剔除伪迹，返回保留掩码。"""
-    samples_per_epoch = max(1, int(round(settings.epoch_seconds * settings.target_fs)))
+    samples_per_epoch = max(1, int(round(settings.epoch_seconds * (fs if fs is not None else settings.target_fs))))
     epoch_count = data.shape[1] // samples_per_epoch
     if epoch_count <= 0:
-        return data[:, :0, :], np.array([], dtype=bool)
+        return np.empty((data.shape[0], 0, samples_per_epoch)), np.array([], dtype=bool)
     epochs = data[:, : epoch_count * samples_per_epoch].reshape(data.shape[0], epoch_count, samples_per_epoch)
     keep = np.ones(epoch_count, dtype=bool)
     amplitude = np.max(np.abs(epochs), axis=(0, 2))
@@ -941,7 +830,7 @@ def _windowed_features(data: np.ndarray) -> dict[str, np.ndarray]:
     variance = np.var(data, axis=1)
     diff_variance = np.var(diff, axis=1)
     mobility = np.sqrt(diff_variance / (variance + 1e-12))
-    complexity = np.sqrt(np.var(second_diff, axis=1) / (diff_variance + 1e-12))
+    complexity = np.sqrt(np.var(second_diff, axis=1) / (diff_variance + 1e-12)) / (mobility + 1e-12)
     return {
         "mean": np.mean(data, axis=1),
         "std": np.std(data, axis=1),
@@ -961,11 +850,14 @@ def _windowed_features(data: np.ndarray) -> dict[str, np.ndarray]:
 def _frequency_features(data: np.ndarray, fs: float, bands: dict[str, tuple[float, float]]) -> dict[str, np.ndarray]:
     nperseg = int(min(1024, 2 ** math.floor(math.log2(max(16, data.shape[1])))))
     frequencies, psd = signal.welch(data, fs=fs, nperseg=nperseg, axis=1)
-    total = np.sum(psd, axis=1) + 1e-20
+    df = float(frequencies[1] - frequencies[0])
+    analysis_mask = (frequencies >= 0.5) & (frequencies <= min(45.0, fs / 2))
+    total = np.sum(psd[:, analysis_mask], axis=1) * df + 1e-20
+    psd_mass = np.sum(psd, axis=1) + 1e-20
     features: dict[str, np.ndarray] = {
         "total_power": total,
-        "mean_frequency": np.sum(frequencies[None, :] * psd, axis=1) / total,
-        "spectral_entropy": -np.sum((psd / total[:, None]) * np.log(psd / total[:, None] + 1e-20), axis=1)
+        "mean_frequency": np.sum(frequencies[None, :] * psd, axis=1) / psd_mass,
+        "spectral_entropy": -np.sum((psd / psd_mass[:, None]) * np.log(psd / psd_mass[:, None] + 1e-20), axis=1)
         / np.log(psd.shape[1]),
     }
     for name, (low, high) in bands.items():
@@ -974,7 +866,7 @@ def _frequency_features(data: np.ndarray, fs: float, bands: dict[str, tuple[floa
             features[f"{name}_absolute_power"] = np.zeros(data.shape[0])
             features[f"{name}_relative_power"] = np.zeros(data.shape[0])
             continue
-        band_power = np.sum(psd[:, mask], axis=1)
+        band_power = np.sum(psd[:, mask], axis=1) * df
         features[f"{name}_absolute_power"] = band_power
         features[f"{name}_relative_power"] = band_power / total
     for name in bands:
@@ -1049,15 +941,14 @@ def plv_matrix(
     high = min(high_hz, nyquist * 0.98)
     if low_hz >= high:
         return np.zeros((data.shape[0], data.shape[0]), dtype=float)
-    b, a = signal.butter(4, [low_hz, high], btype="bandpass", fs=fs)
-    filtered = signal.filtfilt(b, a, data, axis=1)
-    if filtered.shape[1] > max_samples:
-        step = max(1, filtered.shape[1] // max_samples)
-        filtered = filtered[:, ::step]
+    filtered = _bandpass(data, fs, low_hz, high)
     analytic = signal.hilbert(filtered, axis=1)
     magnitude = np.abs(analytic) + 1e-20
     phases = analytic / magnitude
-    plv = np.abs(phases @ phases.conj().T) / filtered.shape[1]
+    if phases.shape[1] > max_samples:
+        # Subsample phases after the Hilbert transform, never alias the voltage signal.
+        phases = phases[:, np.linspace(0, phases.shape[1] - 1, max_samples, dtype=int)]
+    plv = np.abs(phases @ phases.conj().T) / phases.shape[1]
     np.fill_diagonal(plv, 0.0)
     return np.clip(np.real(plv), 0.0, 1.0)
 
@@ -1300,7 +1191,7 @@ def save_figures(
         offset = index * (np.std(data[index, :samples]) * 6 + 1e-9)
         axes[0].plot(time_axis, data[index, :samples] - offset, linewidth=0.7)
     axes[0].set_title("预处理后波形（前 10 秒，垂直偏移显示）")
-    axes[0].set_xlabel("时间 (s)")
+    axes[0].set_xlabel("有效片段拼接时间 (s)，非原始连续时间")
     axes[0].set_ylabel("通道")
     axes[0].grid(alpha=0.25)
 
@@ -1366,7 +1257,7 @@ def save_figures(
         )
         ax.set_ylim(0, min(45, fs / 2))
         ax.set_title(f"代表性通道 {labels[channel_index]} 的 STFT 时频图")
-        ax.set_xlabel("时间 (s)")
+        ax.set_xlabel("有效片段拼接时间 (s)，跨剔除边界需谨慎解释")
         ax.set_ylabel("频率 (Hz)")
         fig.colorbar(mesh, ax=ax, label="功率 (dB)")
         tf_path = output / f"{slug}_时频图.png"
@@ -1379,7 +1270,7 @@ def save_figures(
         low, high = bands[network_band]
         matrix = plv_matrix(data, fs, low, high, 60_000)
         fig, ax = plt.subplots(figsize=(6.5, 5.5), constrained_layout=True)
-        image = ax.imshow(matrix, cmap="viridis", vmin=0, vmax=max(0.01, float(np.max(matrix))))
+        image = ax.imshow(matrix, cmap="viridis", vmin=0, vmax=1)
         ax.set_xticks(range(len(labels)), labels, rotation=90, fontsize=8)
         ax.set_yticks(range(len(labels)), labels, fontsize=8)
         ax.set_title(f"{network_band} 频段 PLV 脑网络矩阵")
@@ -1570,6 +1461,19 @@ def analyze_eeg_file(
         selected_channels=None,
         progress=progress,
     )
+    provenance = {
+        "pipeline_version": PIPELINE_VERSION,
+        "python": platform.python_version(),
+        "packages": {name: package_version(name) for name in ("numpy", "scipy", "pandas", "matplotlib", "openpyxl")},
+        "settings": asdict(settings),
+        "reference": preprocessed["reference"],
+        "source_channel_units": preprocessed["source_channel_units"],
+        "analysis_voltage_unit": "µV",
+        "kept_epoch_indices": preprocessed["kept_epoch_indices"].tolist(),
+        "original_epoch_samples": preprocessed["original_epoch_samples"],
+        "annotation_policy": "timed text only; BAD annotations not automatically excluded",
+        "boundary_policy": "retained epochs concatenated; exploratory features may contain join effects",
+    }
     channel_table, summary_table, metadata = extract_features(preprocessed, settings, progress)
 
     if not include_time:
@@ -1624,6 +1528,7 @@ def analyze_eeg_file(
     with report_path.open("w", encoding="utf-8") as handle:
         handle.write("脑电特征自动分析报告\n")
         handle.write("=" * 52 + "\n")
+        handle.write("方法与软件参数：\n" + json.dumps(provenance, ensure_ascii=False, indent=2) + "\n")
         handle.write(f"输入文件：{source}\n")
         handle.write(f"分析时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         handle.write(f"原始格式/时长：{header.format} / {header.duration_seconds:.2f} s\n")
@@ -1650,12 +1555,17 @@ def analyze_eeg_file(
             cache_path, data=preprocessed["data"], fs=preprocessed["fs"],
             labels=np.asarray(preprocessed["channel_names"], dtype=str),
             units=np.asarray(preprocessed["channel_units"], dtype=str),
+            pipeline_version=PIPELINE_VERSION,
+            kept_epoch_indices=preprocessed["kept_epoch_indices"],
+            original_epoch_samples=preprocessed["original_epoch_samples"],
         )
     progress(1.0, "分析完成")
     return {
         "input": str(source),
         "output_dir": str(output),
         "cache_path": str(cache_path) if cache_path else None,
+        "pipeline_version": PIPELINE_VERSION,
+        "provenance": provenance,
         "header": header.to_dict(),
         "preprocessed": {
             "fs": preprocessed["fs"],
@@ -1695,7 +1605,7 @@ def make_example_bdf(path: PathLike, seconds: float = 20.0, fs: float = 500.0) -
     start = datetime(2024, 1, 1, 8, 30, 0)
 
     fixed = bytearray(256)
-    fixed[0:8] = b"BDF+C   "
+    fixed[0:8] = b"\xffBIOSEMI"
     # Keep every fixed-header field exactly 80 bytes; assigning a longer or
     # shorter byte string to a bytearray slice resizes the whole EDF/BDF header.
     fixed[8:88] = b"Study-001".ljust(80, b" ")

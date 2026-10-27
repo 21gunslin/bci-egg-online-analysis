@@ -5,12 +5,12 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import signal
+from scipy.integrate import trapezoid
 from eeg_feature_engine import AnalysisSettings, extract_features, plv_matrix, read_eeg_file, _downsample
 
 
@@ -97,8 +97,8 @@ def compare_cached(a, b, output, label_a='镇痛前', label_b='镇痛后', chann
     for (f, psd), title in zip(psds, (label_a, label_b)):
         mean = psd.mean(axis=0)
         axes[0].semilogy(f, np.maximum(mean, 1e-20), label=title)
-        total = np.trapz(psd[:, (f >= .5) & (f <= 45)], f[(f >= .5) & (f <= 45)], axis=1)
-        rels.append([float(np.mean(np.trapz(psd[:, (f >= lo) & (f < hi)], f[(f >= lo) & (f < hi)], axis=1) / np.maximum(total, 1e-20)) * 100) for lo, hi in bands.values()])
+        total = trapezoid(psd[:, (f >= .5) & (f <= 45)], f[(f >= .5) & (f <= 45)], axis=1)
+        rels.append([float(np.mean(trapezoid(psd[:, (f >= lo) & (f < hi)], f[(f >= lo) & (f < hi)], axis=1) / np.maximum(total, 1e-20)) * 100) for lo, hi in bands.values()])
     axes[0].set(xlim=(0, 45), xlabel='频率 (Hz)', ylabel='平均 PSD (µV²/Hz)', title='共同通道平均功率谱'); axes[0].legend()
     xx = np.arange(len(bands))
     axes[1].bar(xx - .18, rels[0], .36, label=label_a); axes[1].bar(xx + .18, rels[1], .36, label=label_b)
