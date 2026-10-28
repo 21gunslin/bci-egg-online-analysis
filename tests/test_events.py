@@ -56,6 +56,12 @@ class EventTests(unittest.TestCase):
         self.assertEqual(rows[1]["原始样本索引_0基"],2000)
         self.assertEqual(rows[1]["有效拼接时间_s"],0)
 
+    def test_millisecond_onset_maps_without_float_cancellation(self):
+        parsed={"start_date":"01.01.24","start_time":"08.30.00","events":[{"onset":161.652,"duration":0.,"label":"A"}]}
+        ref={"start_date":"01.01.24","start_time":"08.31.04","duration_seconds":134,"sampling_rate":1000}
+        row=align_events(parsed,ref)[0][0]
+        self.assertEqual(row["原始样本索引_0基"],97652)
+
     def test_duration_overlap_does_not_fabricate_onset_sample(self):
         parsed={"start_date":"01.01.24","start_time":"08.30.00","events":[{"onset":-1.,"duration":3.,"label":"A"}]}
         ref={"start_date":"01.01.24","start_time":"08.30.00","duration_seconds":10,"sampling_rate":1000}

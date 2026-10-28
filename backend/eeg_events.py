@@ -1,6 +1,7 @@
 """BDF annotation-only event support, preserving TAL time and original labels."""
 from collections import Counter
 from datetime import datetime
+from decimal import Decimal, ROUND_FLOOR
 import math
 from pathlib import Path
 import re
@@ -94,7 +95,8 @@ def align_events(parsed, reference, provenance=None, analysis_fs=None, offset_se
     kept_positions = {value:i for i,value in enumerate(kept)} if kept is not None else {}
     rows=[]
     for i,event in enumerate(parsed['events'],1):
-        time = event['onset']+shift
+        exact_time = Decimal(str(event['onset'])) + Decimal(str(shift))
+        time = float(exact_time)
         point = 0 <= time < duration
         overlap = point if event['duration']==0 else time < duration and time+event['duration']>0
         clean_time = None
@@ -109,7 +111,7 @@ def align_events(parsed, reference, provenance=None, analysis_fs=None, offset_se
         rows.append({'事件序号':i,'原始标签':event['label'],'evt原始起点_s':event['onset'],
             '持续时间_s':event['duration'],'相对本段起点_s':time,
             '本段关系':'起点在本段内' if point else '区间与本段重叠' if overlap else '本段外',
-            '原始样本索引_0基':min(int(time*fs),max(0,round(duration*fs)-1)) if point else None,
+            '原始样本索引_0基':min(int((exact_time*Decimal(str(fs))).to_integral_value(rounding=ROUND_FLOOR)),max(0,round(duration*fs)-1)) if point else None,
             '质控状态_起点':quality,'有效拼接时间_s':clean_time})
     return rows, shift
 
