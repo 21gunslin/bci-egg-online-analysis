@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, quote, urlparse
 from eeg_pair_spike import analyze_spike, compare_cached, read_spike_counts
 from eeg_feature_engine import PIPELINE_VERSION
 from eeg_events import analyze_events, read_event_file
+from eeg_session import analyze_session
+from eeg_feature_engine import AnalysisSettings
 
 PUBLIC_SUFFIXES={'.png','.csv','.xlsx','.txt'}
 
@@ -101,6 +103,30 @@ def handle_extra(handler,root):
         result['event_info_b']=pack_event_info(bb.get('event_info'),opts['run_b'])
         result['warnings']=['共同通道、相同有效时长重算；时频图固定同一通道、统一色标；PLV 色标为 0–1，差值色标为 −1–1。',
             '对比时间是质控保留片段的拼接时间，不代表宫缩同步或原始连续时间。差值不证明镇痛的因果作用。']
+        handler.send_json(200,result);return True
+    if parsed.path=='/api/session':
+        opts=read_json(handler)
+        items=opts.get('items')
+        if not isinstance(items,list) or not 2<=len(items)<=30:
+            raise ValueError('请按时间顺序选择 2–30 份 data.bdf。')
+        tokens=[item.get('upload_id') for item in items]
+        if len(set(tokens))!=len(tokens):raise ValueError('上传编号重复，请重新上传。')
+        paths=[upload_path(root,token) for token in tokens]
+        evt=upload_path(root,opts.get('evt_upload'))
+        config=opts.get('settings',{})
+        fs=float(config.get('target_fs',250));epoch=float(config.get('epoch_seconds',2))
+        notch=config.get('notch','50')
+        if not 100<=fs<=2000 or not 1<=epoch<=60 or notch not in ('50','60','none'):
+            raise ValueError('多份分析的采样率、片段长度或陷波设置无效。')
+        settings=AnalysisSettings(target_fs=fs,epoch_seconds=epoch,notches=() if notch=='none' else (float(notch),float(notch)*2))
+        run_id,run=new_run(root)
+        try:
+            result=analyze_session([{'path':p} for p in paths],evt,run,settings,opts.get('evt_offset',0))
+        finally:
+            for path in set(paths+[evt]):path.unlink(missing_ok=True)
+        result['files']=public_files(result['files'],run_id)
+        result['event_info']=pack_event_info(result['event_info'],run_id)
+        result['run_id']=run_id
         handler.send_json(200,result);return True
     if parsed.path=='/api/spike':
         opts=read_json(handler);marker=upload_path(root,opts.get('spike_upload'));eeg=upload_path(root,opts['eeg_upload']) if opts.get('eeg_upload') else None
