@@ -5,7 +5,7 @@
 <div id="startupNotice" class="notice">请通过本机服务地址 <b>127.0.0.1:8765</b> 使用；电脑重启后双击启动器。</div>
 <nav class="tabs" role="tablist" aria-label="分析模式"><button type="button" role="tab" data-tab="single" aria-selected="true">单份 EEG 分析</button><button type="button" role="tab" data-tab="pair" aria-selected="false">镇痛前后 EEG 对比</button><button type="button" role="tab" data-tab="spike" aria-selected="false">spike 独立分析</button></nav>
 
-<section id="single" class="tab-panel" role="tabpanel"><div class="card"><h2>单份 EEG 特征提取</h2><p class="muted">四阶 Butterworth 0.5–45 Hz 双向零相位带通，结合片段质控提取四域特征。</p>
+<section id="single" class="tab-panel" role="tabpanel"><div class="card"><h2>单份 EEG 特征提取</h2><p class="muted">Butterworth（原型 N=4）0.5–45 Hz 双向零相位带通，结合片段质控提取四域特征。</p>
 <form id="singleForm"><label for="singleFile">脑电文件</label><input id="singleFile" type="file" accept=".bdf,.edf,.gdf" required>
 <div class="grid settings"><div><label for="singleFs">目标采样率（Hz）</label><input id="singleFs" type="number" min="100" max="2000" value="250" required></div><div><label for="singleNotch">工频陷波</label><select id="singleNotch"><option value="50">50 / 100 Hz</option><option value="60">60 / 120 Hz</option><option value="none">关闭</option></select></div><div><label for="singleEpoch">片段长度（s）</label><input id="singleEpoch" type="number" min="1" max="60" value="2" required></div></div>
 <fieldset><legend>汇总表纳入的特征类别</legend><label><input type="checkbox" name="feature" value="time" checked>时域</label><label><input type="checkbox" name="feature" value="frequency" checked>频域</label><label><input type="checkbox" name="feature" value="time_frequency" checked>时频域</label><label><input type="checkbox" name="feature" value="network" checked>脑网络</label></fieldset>

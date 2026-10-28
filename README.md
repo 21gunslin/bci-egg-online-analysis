@@ -60,3 +60,16 @@ node --check web/eeg_app.js
 Node.js 仅用于 JavaScript 语法检查，网页运行不需要 Node.js。
 
 贡献与分支流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+
+## MNE 对照审查（0.2.0）
+
+可选安装 `python -m pip install -r requirements-mne.txt` 后执行：
+
+```sh
+python tools/mne_parity_review.py
+```
+
+可用 `--real-data-root` 指定本机 EEG 数据目录；输出默认保存在已忽略的 `results/mne_review/`。工具不输出患者姓名、文件路径或文件头身份信息。完整审查范围、已修正问题及剩余限制见 [MNE_REVIEW.md](docs/MNE_REVIEW.md)。`tools/` 保存独立对照验证工具。
+
+对照通过不等于临床有效性验证。未知参考、设备单位误标、BAD 注释与拼接边界仍需结合采集资料处理。

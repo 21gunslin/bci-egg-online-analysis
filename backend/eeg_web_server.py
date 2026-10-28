@@ -23,7 +23,7 @@ WEB_FILE = ROOT / "web" / "eeg_feature_app.html"
 OUTPUT_ROOT = ROOT / "results" / "eeg_web_output"
 MAX_BYTES = 2 * 1024 * 1024 * 1024
 sys.path.insert(0, str(SCRIPT_DIR))
-from eeg_feature_engine import AnalysisSettings, analyze_eeg_file  # noqa: E402
+from eeg_feature_engine import AnalysisSettings, analyze_eeg_file, PIPELINE_VERSION  # noqa: E402
 from eeg_web_extra import handle_extra, public_files, PUBLIC_SUFFIXES
 
 ANALYSIS_LOCK = threading.Lock()
@@ -77,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/health":
-            return self.send_json(200, {"ok": True, "service": "local-eeg", "version": "pair-spike-1"})
+            return self.send_json(200, {"ok": True, "service": "local-eeg", "version": PIPELINE_VERSION})
         match = re.fullmatch(r"/(download|preview)/([A-Za-z0-9_-]+)/([^/]+)", parsed.path)
         if match:
             mode, run_id, raw_name = match.groups()

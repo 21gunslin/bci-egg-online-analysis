@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from eeg_pair_spike import read_spike_counts, detect_candidates, compare_cached, analyze_spike
 import eeg_web_server as server
+from eeg_feature_engine import make_example_bdf, PIPELINE_VERSION
 
 
 def marker_file(path, counts):
@@ -63,6 +64,34 @@ class WorkbenchTests(unittest.TestCase):
         result = compare_cached(path,path,self.folder / "pair",max_seconds=8)
         self.assertGreater(len(result["rows"]),10)
         self.assertTrue(all(abs(r["变化量_B减A"])<1e-10 for r in result["rows"]))
+
+    def test_single_analysis_provenance_and_versioned_pair_api(self):
+        previous = server.OUTPUT_ROOT
+        server.OUTPUT_ROOT = self.folder
+        self.addCleanup(setattr, server, "OUTPUT_ROOT", previous)
+        httpd = ThreadingHTTPServer(("127.0.0.1",0),server.Handler)
+        threading.Thread(target=httpd.serve_forever,daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        base = "http://127.0.0.1:" + str(httpd.server_port)
+        path = make_example_bdf(self.folder/"example.bdf",seconds=8,fs=200)
+        request = urllib.request.Request(base+"/api/analyze?filename=example.bdf",data=path.read_bytes(),
+            headers={"X-EEG-Settings":json.dumps({"cache_for_comparison":True})},method="POST")
+        with urllib.request.urlopen(request,timeout=120) as response: result=json.load(response)
+        manifest_path=self.folder/result["run_id"]/"analysis_manifest.json"
+        manifest=json.loads(manifest_path.read_text(encoding="utf8"))
+        self.assertEqual(manifest["pipeline_version"],PIPELINE_VERSION)
+        self.assertEqual(manifest["provenance"]["analysis_voltage_unit"],"µV")
+        self.assertEqual(manifest["preprocessed"]["fs"],200)
+        body=json.dumps({"run_a":result["run_id"],"run_b":result["run_id"],"max_seconds":4}).encode()
+        request=urllib.request.Request(base+"/api/compare",data=body,headers={"Content-Type":"application/json"},method="POST")
+        with urllib.request.urlopen(request,timeout=120) as response: pair=json.load(response)
+        self.assertTrue(pair["rows"])
+        self.assertTrue(all(abs(row["变化量_B减A"])<1e-10 for row in pair["rows"]))
+        manifest["pipeline_version"]="old"
+        manifest_path.write_text(json.dumps(manifest),encoding="utf8")
+        with self.assertRaises(urllib.error.HTTPError) as caught: urllib.request.urlopen(request,timeout=10)
+        self.assertEqual(caught.exception.code,400)
 
     def test_static_routes_and_private_cache_block(self):
         previous = server.OUTPUT_ROOT
