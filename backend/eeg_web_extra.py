@@ -7,6 +7,7 @@ import uuid
 from urllib.parse import parse_qs, quote, urlparse
 from eeg_pair_spike import analyze_spike, compare_cached, read_spike_counts
 from eeg_feature_engine import PIPELINE_VERSION
+from eeg_events import analyze_events, read_event_file
 
 PUBLIC_SUFFIXES={'.png','.csv','.xlsx','.txt'}
 
@@ -25,6 +26,12 @@ def new_run(root):
     run_id=datetime.now().strftime('%Y%m%d_%H%M%S_')+uuid.uuid4().hex[:8]
     run=root/run_id;run.mkdir(parents=True,exist_ok=False)
     return run_id,run
+
+
+def pack_event_info(info, run_id):
+    if not info:
+        return None
+    return {**info, 'files': public_files(info['files'], run_id)}
 
 
 def read_json(handler):
@@ -53,9 +60,11 @@ def handle_extra(handler,root):
         length=int(handler.headers.get('Content-Length','0'))
         if not 0<length<=2*1024**3:raise ValueError('文件为空或超过 2 GB。')
         query=parse_qs(parsed.query);filename=query.get('filename',[''])[0]
-        if Path(filename).suffix.lower()!='.bdf':raise ValueError('棘波入口仅支持 .bdf 文件。')
+        if Path(filename).suffix.lower()!='.bdf':raise ValueError('辅助文件仅支持 .bdf 文件。')
         kind=query.get('kind',['eeg'])[0]
+        if kind not in ('eeg','spike','evt'):raise ValueError('未知辅助文件类型。')
         if kind=='spike' and length>20*1024**2:raise ValueError('计数型 spike.bdf 超过 20 MB，请确认文件类型。')
+        if kind=='evt' and length>20*1024**2:raise ValueError('evt.bdf 超过 20 MB。')
         folder=root/'_uploads';folder.mkdir(exist_ok=True)
         token=uuid.uuid4().hex;path=folder/f'{token}.bdf'
         try:
@@ -66,6 +75,7 @@ def handle_extra(handler,root):
                     if not chunk:raise ValueError('文件上传中断。')
                     f.write(chunk);remaining-=len(chunk)
             if kind=='spike':read_spike_counts(path)
+            if kind=='evt':read_event_file(path)
         except Exception:
             path.unlink(missing_ok=True);raise
         handler.send_json(200,{'upload_id':token});return True
@@ -87,6 +97,8 @@ def handle_extra(handler,root):
         result=compare_cached(aa['cache_path'],bb['cache_path'],run,label_a,label_b,opts.get('channel') or None,seconds)
         result['files']=public_files(result['files'],run_id);result['run_id']=run_id
         result['quality_a']=aa['preprocessed'];result['quality_b']=bb['preprocessed']
+        result['event_info_a']=pack_event_info(aa.get('event_info'),opts['run_a'])
+        result['event_info_b']=pack_event_info(bb.get('event_info'),opts['run_b'])
         result['warnings']=['共同通道、相同有效时长重算；时频图固定同一通道、统一色标；PLV 色标为 0–1，差值色标为 −1–1。',
             '对比时间是质控保留片段的拼接时间，不代表宫缩同步或原始连续时间。差值不证明镇痛的因果作用。']
         handler.send_json(200,result);return True
@@ -95,10 +107,18 @@ def handle_extra(handler,root):
         threshold=float(opts.get('threshold_z',6));scale=float(opts.get('amplitude_scale',1));scope=opts.get('scope','marked')
         if not 3<=threshold<=20 or scale not in (1,.001,1000) or scope not in ('marked','all'):raise ValueError('棘波参数无效。')
         run_id,run=new_run(root)
-        try:result=analyze_spike(marker,eeg,run,scope,threshold,scale)
+        evt=upload_path(root,opts['evt_upload']) if opts.get('evt_upload') else None
+        try:
+            result=analyze_spike(marker,eeg,run,scope,threshold,scale)
+            reference=result.pop('recording_header')
+            if evt:
+                info=analyze_events(evt,reference,run,offset_seconds=opts.get('evt_offset',0))
+                result['files'].extend(info['files'])
+                result['event_info']=pack_event_info(info,run_id)
         finally:
             marker.unlink(missing_ok=True)
             if eeg:eeg.unlink(missing_ok=True)
+            if evt:evt.unlink(missing_ok=True)
         result['files']=public_files(result['files'],run_id);result['run_id']=run_id
         handler.send_json(200,result);return True
     return False

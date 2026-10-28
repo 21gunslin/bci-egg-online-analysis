@@ -24,7 +24,7 @@ from scipy.stats import kurtosis, skew
 
 
 SUPPORTED_EXTENSIONS = (".bdf", ".edf", ".gdf")
-PIPELINE_VERSION = "0.2.0"
+PIPELINE_VERSION = "0.3.0"
 PathLike = str | Path
 ProgressCallback = Callable[[float, str], None]
 
