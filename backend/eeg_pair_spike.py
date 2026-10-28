@@ -160,6 +160,7 @@ def read_spike_counts(path):
         raise ValueError('spike 字段不是非负整数计数；需要设备导出说明后才能解释。')
     vals = np.round(vals).astype(int)
     return vals, {'duration_seconds': count, 'sampling_rate': 1, 'unit': unit,
+        'patient': raw[8:88].decode('latin1').strip(),
         'start_date': raw[168:176].decode('latin1').strip(), 'start_time': raw[176:184].decode('latin1').strip()}
 
 
@@ -232,6 +233,7 @@ def detect_candidates(data, fs, labels, counts, scope='marked', z_threshold=6):
 def analyze_spike(marker_path, eeg_path, output, scope='marked', z_threshold=6, amplitude_scale=1):
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     counts, header = read_spike_counts(marker_path)
+    recording_header = dict(header)
     files = []; warnings = ['spike 是 1 Hz 设备计数字段，不包含精确波形、通道或空间位置。计数含义须结合设备说明确认。']
     timeline = pd.DataFrame({'记录秒':np.arange(len(counts)), '设备计数':counts})
     count_path = output/'设备spike逐秒计数.csv'; timeline.to_csv(count_path,index=False,encoding='utf-8-sig'); files.append(count_path)
@@ -243,6 +245,7 @@ def analyze_spike(marker_path, eeg_path, output, scope='marked', z_threshold=6, 
     rows=[];events=[];regions=[]
     if eeg_path:
         data,labels,units,eeg_header,_=read_eeg_file(eeg_path,auto_eeg_only=True)
+        recording_header = eeg_header.to_dict()
         for key in ('start_date','start_time'):
             if header[key] and getattr(eeg_header,key) and header[key]!=getattr(eeg_header,key):
                 raise ValueError('spike 与 data 文件头开始时间不同，请从同一记录段文件夹选择配套文件。')
@@ -288,4 +291,5 @@ def analyze_spike(marker_path, eeg_path, output, scope='marked', z_threshold=6, 
     report=output/'spike分析说明.txt'
     report.write_text(json.dumps(metrics,ensure_ascii=False,indent=2)+'\n\n'+'\n'.join(warnings)+'\n\n方法参考：ACNS 2021 EEG terminology (PMC8135051)；IFCN clinical validation, DOI 10.1212/WNL.0000000000009439。\n本启发式尚未在有专家标签的本队列中验证。',encoding='utf-8');files.append(report)
     return {'kind':'spike','metrics':metrics,'warnings':warnings,'rows':rows[:500],'events':events[:200],
+        'recording_header':recording_header,
         'regions':regions,'table_truncated':len(rows)>500 or len(events)>200,'files':[str(p) for p in files]}
