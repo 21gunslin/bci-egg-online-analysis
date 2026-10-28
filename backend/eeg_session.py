@@ -14,6 +14,7 @@ from eeg_events import align_events, read_event_file, recording_start
 from eeg_feature_engine import (PIPELINE_VERSION, extract_features, plv_matrix,
                                 preprocess_eeg, read_eeg_file)
 from eeg_pair_spike import feature_domain, plotting
+from eeg_metadata import match_datainfo, select_record_channels
 
 
 def retained_runs(pre):
@@ -45,12 +46,13 @@ def check_order(headers):
     return [(t-starts[0]).total_seconds() for t in starts]
 
 
-def analyze_session(items, evt_path, output, settings, evt_offset=0):
+def analyze_session(items, evt_path, output, settings, evt_offset=0, datainfo=None, recordinfo=None):
     if not 2<=len(items)<=30:raise ValueError('多份分析一次支持 2–30 份 data.bdf。')
     if sum(Path(item['path']).stat().st_size for item in items)>2*1024**3:
         raise ValueError('本组 data 总大小超过 2 GB，请减少份数。')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     prepared=[];headers=[];hashes=set();working_bytes=0
+    used_metadata=set();time_checks=[];channel_checks=[];metadata_warnings=[]
     for number,item in enumerate(items,1):
         fingerprint=hashlib.sha256()
         with Path(item['path']).open('rb') as handle:
@@ -58,9 +60,30 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0):
         digest=fingerprint.hexdigest()
         if digest in hashes:raise ValueError(f'第 {number} 份与已有文件完全重复，请移除重复记录。')
         hashes.add(digest)
-        data,_,_,header,_=read_eeg_file(item['path'])
+        data,labels,units,header,_=read_eeg_file(item['path'],auto_eeg_only=recordinfo is None)
+        if datainfo:
+            check=match_datainfo(datainfo,header.to_dict(),used_metadata)
+            time_checks.append({'顺序':number,**check})
+            if abs(check['起点差_BDF减JSON_s'])>1e-6:
+                metadata_warnings.append(f"第{number}段与JSON编号{check['JSON编号']}的起点相差{check['起点差_BDF减JSON_s']:g}秒；事件仍按BDF文件头对齐。")
+            if abs(datainfo['sampling_rate']-header.sampling_rate)>1e-6:
+                metadata_warnings.append(f'第{number}段的BDF采样率与JSON不一致，保留BDF采样率。')
+            if datainfo['channel_count']!=header.channel_count:
+                metadata_warnings.append(f'第{number}段的BDF通道数与JSON不一致，请核查导出配置。')
+        if recordinfo:
+            indices,checks=select_record_channels(recordinfo,labels,units,number)
+            channel_checks.extend(checks)
+            data=data[indices]
+            header.channel_labels=[labels[i] for i in indices]
+            header.channel_units=[units[i] for i in indices]
+            header.analysis_channel_count=len(indices)
         try:pre=preprocess_eeg(data,header,settings)
-        except ValueError as error:raise ValueError(f'第 {number} 份质控失败：{error}') from error
+        except ValueError as error:
+            source=f"第 {number} 份（JSON data{check['JSON编号']}）" if datainfo else f'第 {number} 份'
+            raise ValueError(f'{source}质控失败：{error}') from error
+        if recordinfo:
+            for row in checks:
+                row['本段质控结果']='保留' if row['BDF通道'] in pre['channel_names'] else '剔除' if row['分析选择']=='纳入质控候选' else '未进入质控'
         del data
         working_bytes+=pre['data'].nbytes
         if working_bytes>512*1024**2:raise ValueError('本组有效数据超过 512 MB 内存限额，请减少文件或降低目标采样率。')
@@ -71,6 +94,8 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0):
         raise ValueError('各份实际分析采样率不同，请把统一目标采样率设到不高于最小源采样率。')
     common=[name for name in prepared[0]['channel_names'] if all(name in p['channel_names'] for p in prepared)]
     if len(common)<3:raise ValueError(f'所有记录共同质控保留通道仅 {len(common)} 个；至少需要3个，请减少不兼容的记录。')
+    for row in channel_checks:
+        row['全组共同通道']='是' if row['BDF通道'] in common else '否'
     segment_rows=[];run_specs=[];series=[];weights=[];segment_series=[];clean_cursor=0
     for number,(item,pre,header,start) in enumerate(zip(items,prepared,headers,starts),1):
         pre['data']=pre['data'][[pre['channel_names'].index(c) for c in common]]
@@ -104,6 +129,10 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0):
     def csv(frame,name):
         path=output/name;frame.to_csv(path,index=False,encoding='utf-8-sig');files.append(str(path))
     csv(pd.DataFrame(segment_rows),'多份_分段顺序与时间映射.csv')
+    if datainfo:
+        csv(pd.DataFrame(datainfo['segments']),'多份_JSON分段计划.csv')
+        csv(pd.DataFrame(time_checks),'多份_JSON与BDF时间核对.csv')
+    if recordinfo:csv(pd.DataFrame(channel_checks),'多份_RecordInfo通道类型核对.csv')
     csv(pd.DataFrame(feature_rows),'多份_四域加权特征.csv')
     csv(pd.DataFrame([{'顺序':i+1,'标签':segment_rows[i]['标签'],'特征':key,'数值':float(value)}
         for i,s in enumerate(segment_series) for key,value in s.items()]),'多份_逐文件特征.csv')
@@ -140,11 +169,19 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0):
         '第N段仅表示你确认的时间顺序，没有状态分类；evt 原始编码含义未知，不推断宫缩/镇痛，也不自动配对事件。',
         '间隙中的事件不会移入任一 data；有效拼接时间是显示/索引坐标，不是原始连续记录，也不生成伪连续 BDF。',
         '文件头通常为秒级精度；短连续段的低频、相位和网络指标需谨慎解释。']
+    if datainfo:
+        warnings.extend(datainfo['warnings'])
+        warnings.append(f"已匹配JSON中的{len(used_metadata)}/{datainfo['waveform_count']}份有波形记录；允许选择子集，未选择记录不纳入分析。")
+    if recordinfo:warnings.extend(recordinfo['warnings'])
+    warnings.extend(metadata_warnings)
     event_info={'total_events':len(parsed['events']),'in_segment':len(related),
         'outside_segment':len(parsed['events'])-len(related),'alignment_shift_seconds':shift,
         'rows':event_rows[:1000],'table_truncated':len(event_rows)>1000,
         'labels':[{'原始标签':k,'次数':v} for k,v in Counter(e['label'] for e in parsed['events']).items()],
-        'warnings':[f'有 {gap_events} 个事件起点落在所选记录的时间间隙中。',*warnings[-3:]],'files':[]}
+        'warnings':[f'有 {gap_events} 个事件起点落在所选记录的时间间隙中。',
+            '保留evt原始标签，不推断KeyIn编码含义，不自动配对事件。',
+            '事件按BDF原始文件头时间与显式evt偏移对齐；JSON时间仅用于核对，文件头精度和硬件同步仍需核实。',
+            '位于未选择记录或时间间隙中的事件不会移入已选data；区间跨多段时按编号去重计数。'], 'files':[]}
     plt=plotting()
     def save(fig,name):
         path=output/name;fig.savefig(path,dpi=145,bbox_inches='tight');plt.close(fig);files.append(str(path))
@@ -190,9 +227,13 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0):
     report=output/'多份_处理与时间映射说明.txt'
     report.write_text('\n'.join(warnings)+'\n\n'+json.dumps({'pipeline_version':PIPELINE_VERSION,
         'common_channels':common,'analysis_fs':fs,'continuous_runs':len(run_specs),
-        'settings':settings.__dict__,'software':{name:package_version(name) for name in ('numpy','scipy','pandas','matplotlib')},'segments':segment_rows},ensure_ascii=False,indent=2),encoding='utf8');files.append(str(report))
+        'settings':settings.__dict__,'software':{name:package_version(name) for name in ('numpy','scipy','pandas','matplotlib')},'segments':segment_rows,
+        'metadata_time_checks':time_checks,'metadata_channel_checks':channel_checks},ensure_ascii=False,indent=2),encoding='utf8');files.append(str(report))
     return {'kind':'session','metrics':{'files':len(items),'common_channels':len(common),'sampling_rate':fs,
         'recorded_seconds':sum(h['duration_seconds'] for h in headers),'span_seconds':span,
         'effective_seconds':clean_cursor,'continuous_runs':len(run_specs)},
         'segments':segment_rows,'common_labels':common,'rows':feature_rows[:2000],
+        'metadata_info':{'datainfo':datainfo,'recordinfo':recordinfo,'time_checks':time_checks,
+            'channel_checks':channel_checks,'warnings':metadata_warnings} if datainfo or recordinfo else None,
         'table_truncated':len(feature_rows)>2000,'event_info':event_info,'warnings':warnings,'files':files}
+

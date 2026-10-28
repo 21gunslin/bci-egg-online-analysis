@@ -14,7 +14,7 @@
 
 
 <section id="session" class="tab-panel hide" role="tabpanel"><div class="card"><h2>按时间顺序合并多份 data</h2><p class="muted">同一产妇、同一次记录。第1、2、3…段仅表示时间先后，不填写状态标签。所有 data 共用一份 evt.bdf。</p>
-<form id="batchForm"><label for="batchCount">本次分析份数（2–30）</label><input id="batchCount" type="number" min="2" max="30" value="2" required>
+<form id="batchForm"><div class="advanced"><h3>JSON 元数据辅助（可选）</h3><div class="two-col"><div><label for="batchDataInfo">datainfo.json：自动生成分段时间表</label><input id="batchDataInfo" type="file" accept=".json"></div><div><label for="batchRecordInfo">RecordInfo.json：核对通道类型</label><input id="batchRecordInfo" type="file" accept=".json"></div></div><p class="muted small">选中后先生成安全预览。datainfo 自动按“有波形时长”的条目设置份数，可手动改为子集；不会覆盖 BDF 时间。RecordInfo 仅提取通道配置，不展示或保存身份和摄像头凭据。</p><button id="batchClearMetadata" type="button" class="secondary">清除 JSON 辅助</button><div id="batchMetadataStatus" class="status" role="status"></div><div id="batchMetadataPreview"></div></div><label for="batchCount">本次分析份数（2–30）</label><input id="batchCount" type="number" min="2" max="30" value="2" required>
 <label for="batchFiles">逐份添加 data.bdf（也可一次选择多份，再调整顺序）</label><input id="batchFiles" type="file" accept=".bdf" multiple><p id="batchQueueInfo" class="muted small">已添加 0 / 2 份</p>
 <div id="batchQueue"></div><button id="batchSort" class="secondary" type="button">按文件头时间排序</button>
 <label for="batchEvt">本组唯一对应的 evt.bdf</label><input id="batchEvt" type="file" accept=".bdf" required>
