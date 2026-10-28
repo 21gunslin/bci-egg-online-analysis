@@ -178,7 +178,10 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0, datainfo=No
         'outside_segment':len(parsed['events'])-len(related),'alignment_shift_seconds':shift,
         'rows':event_rows[:1000],'table_truncated':len(event_rows)>1000,
         'labels':[{'原始标签':k,'次数':v} for k,v in Counter(e['label'] for e in parsed['events']).items()],
-        'warnings':[f'有 {gap_events} 个事件起点落在所选记录的时间间隙中。',*warnings[-3:]],'files':[]}
+        'warnings':[f'有 {gap_events} 个事件起点落在所选记录的时间间隙中。',
+            '保留evt原始标签，不推断KeyIn编码含义，不自动配对事件。',
+            '事件按BDF原始文件头时间与显式evt偏移对齐；JSON时间仅用于核对，文件头精度和硬件同步仍需核实。',
+            '位于未选择记录或时间间隙中的事件不会移入已选data；区间跨多段时按编号去重计数。'], 'files':[]}
     plt=plotting()
     def save(fig,name):
         path=output/name;fig.savefig(path,dpi=145,bbox_inches='tight');plt.close(fig);files.append(str(path))
@@ -233,3 +236,4 @@ def analyze_session(items, evt_path, output, settings, evt_offset=0, datainfo=No
         'metadata_info':{'datainfo':datainfo,'recordinfo':recordinfo,'time_checks':time_checks,
             'channel_checks':channel_checks,'warnings':metadata_warnings} if datainfo or recordinfo else None,
         'table_truncated':len(feature_rows)>2000,'event_info':event_info,'warnings':warnings,'files':files}
+
