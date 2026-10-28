@@ -24,3 +24,10 @@ __pycache__/
 venv/
 .DS_Store
 Thumbs.db
+
+# Raw acquisition metadata may contain patient identity or camera credentials
+ExamInfo.json
+RecordInfo.json
+datainfo.json
+videoinfo.json
+JsonVersion.json
