@@ -10,6 +10,7 @@ from eeg_feature_engine import PIPELINE_VERSION
 from eeg_events import analyze_events, read_event_file
 from eeg_session import analyze_session
 from eeg_feature_engine import AnalysisSettings
+from eeg_metadata import decode_metadata, MAX_JSON_BYTES
 
 PUBLIC_SUFFIXES={'.png','.csv','.xlsx','.txt'}
 
@@ -49,9 +50,10 @@ def run_manifest(root,run_id):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def upload_path(root,token):
+def upload_path(root,token,suffix='.bdf'):
     if not isinstance(token,str) or not re.fullmatch(r'[a-f0-9]{32}',token):raise ValueError('无效上传编号。')
-    path=root/'_uploads'/f'{token}.bdf'
+    if suffix not in ('.bdf','.json'):raise ValueError('不支持的临时文件类型。')
+    path=root/'_uploads'/f'{token}{suffix}'
     if not path.is_file():raise ValueError('上传文件已失效，请重新选择文件。')
     return path
 
@@ -62,8 +64,21 @@ def handle_extra(handler,root):
         length=int(handler.headers.get('Content-Length','0'))
         if not 0<length<=2*1024**3:raise ValueError('文件为空或超过 2 GB。')
         query=parse_qs(parsed.query);filename=query.get('filename',[''])[0]
-        if Path(filename).suffix.lower()!='.bdf':raise ValueError('辅助文件仅支持 .bdf 文件。')
         kind=query.get('kind',['eeg'])[0]
+        if kind in ('datainfo','recordinfo'):
+            if Path(filename).suffix.lower()!='.json' or length>MAX_JSON_BYTES:
+                raise ValueError('元数据需要不超过2 MB的JSON文件。')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise ValueError('JSON上传中断。')
+            safe=decode_metadata(body,kind)
+            if query.get('preview',['0'])[0]=='1':
+                handler.send_json(200,{'metadata':safe});return True
+            folder=root/'_uploads';folder.mkdir(exist_ok=True)
+            token=uuid.uuid4().hex
+            # Save only the allow-listed representation, never the raw camera/identity fields.
+            (folder/f'{token}.json').write_text(json.dumps(safe,ensure_ascii=False),encoding='utf8')
+            handler.send_json(200,{'upload_id':token,'metadata':safe});return True
+        if Path(filename).suffix.lower()!='.bdf':raise ValueError('辅助文件仅支持 .bdf 文件。')
         if kind not in ('eeg','spike','evt'):raise ValueError('未知辅助文件类型。')
         if kind=='spike' and length>20*1024**2:raise ValueError('计数型 spike.bdf 超过 20 MB，请确认文件类型。')
         if kind=='evt' and length>20*1024**2:raise ValueError('evt.bdf 超过 20 MB。')
@@ -113,6 +128,13 @@ def handle_extra(handler,root):
         if len(set(tokens))!=len(tokens):raise ValueError('上传编号重复，请重新上传。')
         paths=[upload_path(root,token) for token in tokens]
         evt=upload_path(root,opts.get('evt_upload'))
+        metadata_paths=[];metadata={}
+        for kind in ('datainfo','recordinfo'):
+            if opts.get(kind+'_upload'):
+                path=upload_path(root,opts[kind+'_upload'],suffix='.json')
+                safe=json.loads(path.read_text(encoding='utf8'))
+                if safe.get('kind')!=kind:raise ValueError('JSON上传类型不匹配，请重新选择。')
+                metadata_paths.append(path);metadata[kind]=safe
         config=opts.get('settings',{})
         fs=float(config.get('target_fs',250));epoch=float(config.get('epoch_seconds',2))
         notch=config.get('notch','50')
@@ -121,9 +143,9 @@ def handle_extra(handler,root):
         settings=AnalysisSettings(target_fs=fs,epoch_seconds=epoch,notches=() if notch=='none' else (float(notch),float(notch)*2))
         run_id,run=new_run(root)
         try:
-            result=analyze_session([{'path':p} for p in paths],evt,run,settings,opts.get('evt_offset',0))
+            result=analyze_session([{'path':p} for p in paths],evt,run,settings,opts.get('evt_offset',0),**metadata)
         finally:
-            for path in set(paths+[evt]):path.unlink(missing_ok=True)
+            for path in set(paths+[evt]+metadata_paths):path.unlink(missing_ok=True)
         result['files']=public_files(result['files'],run_id)
         result['event_info']=pack_event_info(result['event_info'],run_id)
         result['run_id']=run_id
