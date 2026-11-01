@@ -24,7 +24,8 @@ OUTPUT_ROOT = ROOT / "results" / "eeg_web_output"
 MAX_BYTES = 2 * 1024 * 1024 * 1024
 sys.path.insert(0, str(SCRIPT_DIR))
 from eeg_feature_engine import AnalysisSettings, analyze_eeg_file, PIPELINE_VERSION  # noqa: E402
-from eeg_web_extra import handle_extra, public_files, PUBLIC_SUFFIXES
+from eeg_web_extra import handle_extra, public_files, PUBLIC_SUFFIXES, upload_path, pack_event_info
+from eeg_events import analyze_events
 
 ANALYSIS_LOCK = threading.Lock()
 
@@ -152,6 +153,7 @@ class Handler(BaseHTTPRequestHandler):
             run_dir = OUTPUT_ROOT / run_id
             run_dir.mkdir(parents=True, exist_ok=False)
             fd, tmp_name = tempfile.mkstemp(prefix="eeg_", suffix=ext, dir=str(OUTPUT_ROOT))
+            evt_path = None
             try:
                 with os.fdopen(fd, "wb") as out:
                     remaining = length
@@ -170,7 +172,16 @@ class Handler(BaseHTTPRequestHandler):
                     include_network="network" in features,
                     save_preprocessed=bool(opts.get('cache_for_comparison', False)),
                 )
+                if opts.get('evt_upload'):
+                    evt_path = upload_path(OUTPUT_ROOT, opts['evt_upload'])
+                    result['event_info'] = analyze_events(
+                        evt_path, result['header'], run_dir, result['provenance'],
+                        result['preprocessed']['fs'], opts.get('evt_offset', 0),
+                    )
+                    result['outputs']['event_files'] = result['event_info']['files']
             finally:
+                if evt_path:
+                    evt_path.unlink(missing_ok=True)
                 try:
                     os.unlink(tmp_name)
                 except OSError:
@@ -196,7 +207,8 @@ class Handler(BaseHTTPRequestHandler):
             result['settings'] = {**asdict(settings), 'auto_eeg_only': bool(opts.get('auto_eeg_only',True))}
             (run_dir/'analysis_manifest.json').write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8')
             return self.send_json(200, {"kind":"single", "run_id":run_id, "metrics": metrics, "files": public_files(paths,run_id),
-                'warnings':pre.get('notes',[]), 'channels':pre.get('channels',[])})
+                'warnings':pre.get('notes',[]), 'channels':pre.get('channels',[]),
+                'event_info':pack_event_info(result.get('event_info'),run_id)})
         except Exception as exc:
             # Avoid returning raw paths or patient metadata in an error message.
             return self.send_json(500, {"error": f"分析出错：{type(exc).__name__}: {str(exc)[:300]}"})

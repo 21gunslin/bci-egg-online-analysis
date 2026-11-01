@@ -7,6 +7,10 @@ import uuid
 from urllib.parse import parse_qs, quote, urlparse
 from eeg_pair_spike import analyze_spike, compare_cached, read_spike_counts
 from eeg_feature_engine import PIPELINE_VERSION
+from eeg_events import analyze_events, read_event_file
+from eeg_session import analyze_session
+from eeg_feature_engine import AnalysisSettings
+from eeg_metadata import decode_metadata, MAX_JSON_BYTES
 
 PUBLIC_SUFFIXES={'.png','.csv','.xlsx','.txt'}
 
@@ -27,6 +31,12 @@ def new_run(root):
     return run_id,run
 
 
+def pack_event_info(info, run_id):
+    if not info:
+        return None
+    return {**info, 'files': public_files(info['files'], run_id)}
+
+
 def read_json(handler):
     length=int(handler.headers.get('Content-Length','0'))
     if not 0<length<65536:raise ValueError('请求参数过长或为空。')
@@ -40,9 +50,10 @@ def run_manifest(root,run_id):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def upload_path(root,token):
+def upload_path(root,token,suffix='.bdf'):
     if not isinstance(token,str) or not re.fullmatch(r'[a-f0-9]{32}',token):raise ValueError('无效上传编号。')
-    path=root/'_uploads'/f'{token}.bdf'
+    if suffix not in ('.bdf','.json'):raise ValueError('不支持的临时文件类型。')
+    path=root/'_uploads'/f'{token}{suffix}'
     if not path.is_file():raise ValueError('上传文件已失效，请重新选择文件。')
     return path
 
@@ -53,9 +64,24 @@ def handle_extra(handler,root):
         length=int(handler.headers.get('Content-Length','0'))
         if not 0<length<=2*1024**3:raise ValueError('文件为空或超过 2 GB。')
         query=parse_qs(parsed.query);filename=query.get('filename',[''])[0]
-        if Path(filename).suffix.lower()!='.bdf':raise ValueError('棘波入口仅支持 .bdf 文件。')
         kind=query.get('kind',['eeg'])[0]
+        if kind in ('datainfo','recordinfo'):
+            if Path(filename).suffix.lower()!='.json' or length>MAX_JSON_BYTES:
+                raise ValueError('元数据需要不超过2 MB的JSON文件。')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise ValueError('JSON上传中断。')
+            safe=decode_metadata(body,kind)
+            if query.get('preview',['0'])[0]=='1':
+                handler.send_json(200,{'metadata':safe});return True
+            folder=root/'_uploads';folder.mkdir(exist_ok=True)
+            token=uuid.uuid4().hex
+            # Save only the allow-listed representation, never the raw camera/identity fields.
+            (folder/f'{token}.json').write_text(json.dumps(safe,ensure_ascii=False),encoding='utf8')
+            handler.send_json(200,{'upload_id':token,'metadata':safe});return True
+        if Path(filename).suffix.lower()!='.bdf':raise ValueError('辅助文件仅支持 .bdf 文件。')
+        if kind not in ('eeg','spike','evt'):raise ValueError('未知辅助文件类型。')
         if kind=='spike' and length>20*1024**2:raise ValueError('计数型 spike.bdf 超过 20 MB，请确认文件类型。')
+        if kind=='evt' and length>20*1024**2:raise ValueError('evt.bdf 超过 20 MB。')
         folder=root/'_uploads';folder.mkdir(exist_ok=True)
         token=uuid.uuid4().hex;path=folder/f'{token}.bdf'
         try:
@@ -66,6 +92,7 @@ def handle_extra(handler,root):
                     if not chunk:raise ValueError('文件上传中断。')
                     f.write(chunk);remaining-=len(chunk)
             if kind=='spike':read_spike_counts(path)
+            if kind=='evt':read_event_file(path)
         except Exception:
             path.unlink(missing_ok=True);raise
         handler.send_json(200,{'upload_id':token});return True
@@ -87,18 +114,59 @@ def handle_extra(handler,root):
         result=compare_cached(aa['cache_path'],bb['cache_path'],run,label_a,label_b,opts.get('channel') or None,seconds)
         result['files']=public_files(result['files'],run_id);result['run_id']=run_id
         result['quality_a']=aa['preprocessed'];result['quality_b']=bb['preprocessed']
+        result['event_info_a']=pack_event_info(aa.get('event_info'),opts['run_a'])
+        result['event_info_b']=pack_event_info(bb.get('event_info'),opts['run_b'])
         result['warnings']=['共同通道、相同有效时长重算；时频图固定同一通道、统一色标；PLV 色标为 0–1，差值色标为 −1–1。',
             '对比时间是质控保留片段的拼接时间，不代表宫缩同步或原始连续时间。差值不证明镇痛的因果作用。']
+        handler.send_json(200,result);return True
+    if parsed.path=='/api/session':
+        opts=read_json(handler)
+        items=opts.get('items')
+        if not isinstance(items,list) or not 2<=len(items)<=30:
+            raise ValueError('请按时间顺序选择 2–30 份 data.bdf。')
+        tokens=[item.get('upload_id') for item in items]
+        if len(set(tokens))!=len(tokens):raise ValueError('上传编号重复，请重新上传。')
+        paths=[upload_path(root,token) for token in tokens]
+        evt=upload_path(root,opts.get('evt_upload'))
+        metadata_paths=[];metadata={}
+        for kind in ('datainfo','recordinfo'):
+            if opts.get(kind+'_upload'):
+                path=upload_path(root,opts[kind+'_upload'],suffix='.json')
+                safe=json.loads(path.read_text(encoding='utf8'))
+                if safe.get('kind')!=kind:raise ValueError('JSON上传类型不匹配，请重新选择。')
+                metadata_paths.append(path);metadata[kind]=safe
+        config=opts.get('settings',{})
+        fs=float(config.get('target_fs',250));epoch=float(config.get('epoch_seconds',2))
+        notch=config.get('notch','50')
+        if not 100<=fs<=2000 or not 1<=epoch<=60 or notch not in ('50','60','none'):
+            raise ValueError('多份分析的采样率、片段长度或陷波设置无效。')
+        settings=AnalysisSettings(target_fs=fs,epoch_seconds=epoch,notches=() if notch=='none' else (float(notch),float(notch)*2))
+        run_id,run=new_run(root)
+        try:
+            result=analyze_session([{'path':p} for p in paths],evt,run,settings,opts.get('evt_offset',0),**metadata)
+        finally:
+            for path in set(paths+[evt]+metadata_paths):path.unlink(missing_ok=True)
+        result['files']=public_files(result['files'],run_id)
+        result['event_info']=pack_event_info(result['event_info'],run_id)
+        result['run_id']=run_id
         handler.send_json(200,result);return True
     if parsed.path=='/api/spike':
         opts=read_json(handler);marker=upload_path(root,opts.get('spike_upload'));eeg=upload_path(root,opts['eeg_upload']) if opts.get('eeg_upload') else None
         threshold=float(opts.get('threshold_z',6));scale=float(opts.get('amplitude_scale',1));scope=opts.get('scope','marked')
         if not 3<=threshold<=20 or scale not in (1,.001,1000) or scope not in ('marked','all'):raise ValueError('棘波参数无效。')
         run_id,run=new_run(root)
-        try:result=analyze_spike(marker,eeg,run,scope,threshold,scale)
+        evt=upload_path(root,opts['evt_upload']) if opts.get('evt_upload') else None
+        try:
+            result=analyze_spike(marker,eeg,run,scope,threshold,scale)
+            reference=result.pop('recording_header')
+            if evt:
+                info=analyze_events(evt,reference,run,offset_seconds=opts.get('evt_offset',0))
+                result['files'].extend(info['files'])
+                result['event_info']=pack_event_info(info,run_id)
         finally:
             marker.unlink(missing_ok=True)
             if eeg:eeg.unlink(missing_ok=True)
+            if evt:evt.unlink(missing_ok=True)
         result['files']=public_files(result['files'],run_id);result['run_id']=run_id
         handler.send_json(200,result);return True
     return False
