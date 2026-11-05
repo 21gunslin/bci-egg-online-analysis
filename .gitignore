@@ -5,11 +5,14 @@ uploads/
 *.bdf
 *.edf
 *.gdf
+*.fif
+*.fif.gz
 *.xlsx
 *.xls
 *.csv
 *.npz
 *.npy
+*.joblib
 *.docx
 *.pptx
 *.zip
@@ -22,5 +25,13 @@ __pycache__/
 .venv/
 .venv-*/
 venv/
+node_modules/
 .DS_Store
 Thumbs.db
+
+# Raw acquisition metadata may contain patient identity or camera credentials
+ExamInfo.json
+RecordInfo.json
+datainfo.json
+videoinfo.json
+JsonVersion.json

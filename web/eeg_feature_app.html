@@ -1,28 +1,918 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>脑电研究工作台</title><link rel="stylesheet" href="/assets/eeg_app.css"></head>
-<body><main class="wrap">
-<header><div class="eyebrow">LOCAL EEG WORKSPACE</div><h1>脑电研究工作台</h1><p>单份特征提取、镇痛前后对比与 spike 独立复核。文件仅在本机处理。</p></header>
-<div id="startupNotice" class="notice">请通过本机服务地址 <b>127.0.0.1:8765</b> 使用；电脑重启后双击启动器。</div>
-<nav class="tabs" role="tablist" aria-label="分析模式"><button type="button" role="tab" data-tab="single" aria-selected="true">单份 EEG 分析</button><button type="button" role="tab" data-tab="pair" aria-selected="false">镇痛前后 EEG 对比</button><button type="button" role="tab" data-tab="spike" aria-selected="false">spike 独立分析</button></nav>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>脑电研究工作台</title>
+    <link rel="stylesheet" href="/assets/eeg_app.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header>
+        <div class="eyebrow">LOCAL EEG WORKSPACE</div>
+        <h1>脑电研究工作台</h1>
+        <p>
+          论文探索性脑电分析工具：特征提取、镇痛前后对比、spike复核与原始BDF质控/FIF导出。文件仅在本机处理。
+        </p>
+      </header>
+      <div id="startupNotice" class="notice">
+        请通过本机服务地址 <b>127.0.0.1:8765</b> 使用；电脑重启后双击启动器。
+      </div>
+      <div class="card">
+        <label for="featureProfile">EEG特征计算方案（适用于单份、多份和镇痛前后对比）</label
+        ><select id="featureProfile">
+          <option value="standard">原有探索方案</option>
+          <option value="thesis_v1">论文方案：12项时域＋14项频域＋10项时频＋五频段网络</option>
+        </select>
+        <p id="profileNotice" class="muted small">
+          选择“论文方案”可在结果末尾查看完整探索性附录，包含数值、公式、单位和解释界限，并下载可打印HTML或CSV。原有探索方案保留。
+        </p>
+        <details>
+          <summary>论文方案的列数和计算方式</summary>
+          <p>
+            7种汇总为保留通道均值、通道间标准差、额区、中央区、顶区、颞区、枕区。每时相：时域84＋频域103＋时频70＋网络30＝287列。镇痛前、镇痛后及差值共861列。缺失电极对保留空列，区别于旧表仅保留5／3／2对不对称指标所得的856列。
+          </p>
+          <p>
+            Welch与STFT均用2秒Hann窗、50%重叠；时频先汇总频段功率，再求时间标准差和CV。剔除片段和文件边界不跨越计算。C3/C4与T3/T4属于中央区、颞区α不对称。
+          </p>
+        </details>
+      </div>
+      <details class="card">
+        <summary>Montage 映射：MNE标准10–20模板（非个体实测）</summary>
+        <p class="muted">
+          核对原始通道名、标准名称、类型和模板坐标。导入RecordInfo后可在JSON预览中查看当前配置的映射；分析结果会另列实际通道及质控状态。
+        </p>
+        <button id="showMontage" type="button" class="secondary run">
+          查看并导出常用Montage映射表
+        </button>
+        <div id="montageStatus" class="status" role="status"></div>
+        <div id="montageResult" class="result hide"></div>
+      </details>
+      <nav class="tabs" role="tablist" aria-label="分析模式">
+        <button type="button" role="tab" data-tab="single" aria-selected="true">
+          单份 EEG 分析</button
+        ><button type="button" role="tab" data-tab="session" aria-selected="false">
+          多份 data 拼接</button
+        ><button type="button" role="tab" data-tab="pair" aria-selected="false">
+          镇痛前后 EEG 对比</button
+        ><button type="button" role="tab" data-tab="spike" aria-selected="false">
+          spike 独立分析
+        </button>
+      </nav>
 
-<section id="single" class="tab-panel" role="tabpanel"><div class="card"><h2>单份 EEG 特征提取</h2><p class="muted">Butterworth（原型 N=4）0.5–45 Hz 双向零相位带通，结合片段质控提取四域特征。</p>
-<form id="singleForm"><label for="singleFile">脑电文件</label><input id="singleFile" type="file" accept=".bdf,.edf,.gdf" required>
-<div class="grid settings"><div><label for="singleFs">目标采样率（Hz）</label><input id="singleFs" type="number" min="100" max="2000" value="250" required></div><div><label for="singleNotch">工频陷波</label><select id="singleNotch"><option value="50">50 / 100 Hz</option><option value="60">60 / 120 Hz</option><option value="none">关闭</option></select></div><div><label for="singleEpoch">片段长度（s）</label><input id="singleEpoch" type="number" min="1" max="60" value="2" required></div></div>
-<fieldset><legend>汇总表纳入的特征类别</legend><label><input type="checkbox" name="feature" value="time" checked>时域</label><label><input type="checkbox" name="feature" value="frequency" checked>频域</label><label><input type="checkbox" name="feature" value="time_frequency" checked>时频域</label><label><input type="checkbox" name="feature" value="network" checked>脑网络</label></fieldset>
-<p class="muted small">类别选项筛选汇总表；通道级表保留通道特征与质控指标。</p><label class="check"><input id="singleEegOnly" type="checkbox" checked>自动排除 EOG、ECG、EMG、Status 等非 EEG 通道</label>
-<button class="primary run" type="submit">开始单份分析</button><div id="singleStatus" class="status" role="status"></div></form></div><div id="singleResult" class="result hide"></div></section>
+      <section id="single" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <h2>单份 EEG 特征提取</h2>
+          <p class="muted">
+            Butterworth（原型 N=4）0.5–45 Hz 双向零相位带通，结合片段质控提取四域特征。
+          </p>
+          <form id="singleForm">
+            <fieldset class="format-choice">
+              <legend>EEG文件格式（必须且只能勾选一种）</legend>
+              <label class="check"
+                ><input
+                  type="radio"
+                  name="singleFormat"
+                  value="bdf"
+                  checked
+                />BDF（data.bdf）</label
+              ><label class="check"
+                ><input type="radio" name="singleFormat" value="fif" />FIF（fdata.fif）</label
+              >
+              <p class="muted small">
+                切换格式会清空本入口的已选脑电；evt.bdf 与 JSON
+                不属于EEG格式选择。FIF按已保存的坏道/BAD标记排除；保留当前特征分析的带通与陷波设置。
+              </p>
+            </fieldset>
+            <label for="singleFile">脑电文件</label
+            ><input id="singleFile" type="file" accept=".bdf" required />
+            <div class="grid settings">
+              <div>
+                <label for="singleFs">目标采样率（Hz）</label
+                ><input id="singleFs" type="number" min="100" max="2000" value="250" required />
+              </div>
+              <div>
+                <label for="singleNotch">工频陷波</label
+                ><select id="singleNotch">
+                  <option value="50">50 / 100 Hz</option>
+                  <option value="60">60 / 120 Hz</option>
+                  <option value="none">关闭</option>
+                </select>
+              </div>
+              <div>
+                <label for="singleEpoch">片段长度（s）</label
+                ><input id="singleEpoch" type="number" min="1" max="60" value="2" required />
+              </div>
+            </div>
+            <fieldset>
+              <legend>汇总表纳入的特征类别</legend>
+              <label><input type="checkbox" name="feature" value="time" checked />时域</label
+              ><label><input type="checkbox" name="feature" value="frequency" checked />频域</label
+              ><label
+                ><input
+                  type="checkbox"
+                  name="feature"
+                  value="time_frequency"
+                  checked
+                />时频域</label
+              ><label><input type="checkbox" name="feature" value="network" checked />脑网络</label>
+            </fieldset>
+            <p class="muted small">类别选项筛选汇总表；通道级表保留通道特征与质控指标。</p>
+            <label class="check"
+              ><input id="singleEegOnly" type="checkbox" checked />自动排除 EOG、ECG、EMG、Status
+              等非 EEG 通道</label
+            >
+            <div class="advanced">
+              <label class="check"
+                ><input id="singleUseEvt" type="checkbox" />使用 evt.bdf 事件标记（可选）</label
+              >
+              <div id="singleEvtOptions" class="hide">
+                <div class="two-col">
+                  <div>
+                    <label for="singleEvt">配套 evt.bdf</label
+                    ><input id="singleEvt" type="file" accept=".bdf" disabled /><label
+                      for="singleEvtOffset"
+                      >额外校正偏移（秒，默认 0）</label
+                    ><input
+                      id="singleEvtOffset"
+                      type="number"
+                      step="0.001"
+                      min="-86400"
+                      max="86400"
+                      value="0"
+                      disabled
+                    />
+                  </div>
+                </div>
+                <p class="muted small">
+                  按文件头时间对齐，保留原始标签；事件文件可覆盖整次记录，落在当前片段外的事件会单独列出。偏移仅在已确认时钟差后填写，不自动判断宫缩或镇痛含义。
+                </p>
+              </div>
+            </div>
+            <button class="primary run" type="submit">开始单份分析</button>
+            <div id="singleStatus" class="status" role="status"></div>
+          </form>
+        </div>
+        <div id="singleResult" class="result hide"></div>
+      </section>
 
-<section id="pair" class="tab-panel hide" role="tabpanel"><div class="card"><h2>同一受试者的镇痛前后对比</h2><p class="muted">选择前后两份 <b>data.bdf</b> 或其他 EEG 波形文件。以共同质控通道、相同有效时长重新计算，统一图表尺度。</p>
-<form id="pairForm"><div class="two-col"><div><label for="pairFileA">A：镇痛前 EEG</label><input id="pairFileA" type="file" accept=".bdf,.edf,.gdf" required><label for="pairLabelA">记录 A 标签</label><input id="pairLabelA" type="text" value="镇痛前" maxlength="30" required></div><div><label for="pairFileB">B：镇痛后 EEG</label><input id="pairFileB" type="file" accept=".bdf,.edf,.gdf" required><label for="pairLabelB">记录 B 标签</label><input id="pairLabelB" type="text" value="镇痛后" maxlength="30" required></div></div>
-<div class="grid settings"><div><label for="pairFs">统一采样率（Hz）</label><input id="pairFs" type="number" min="100" max="2000" value="250" required></div><div><label for="pairNotch">统一工频陷波</label><select id="pairNotch"><option value="50">50 / 100 Hz</option><option value="60">60 / 120 Hz</option><option value="none">关闭</option></select></div><div><label for="pairEpoch">片段长度（s）</label><input id="pairEpoch" type="number" min="1" max="60" value="2" required></div><div><label for="pairSeconds">每份最多对比有效时长（s）</label><input id="pairSeconds" type="number" min="2" max="600" value="180" required></div></div>
-<label class="check"><input id="pairConfirm" type="checkbox" required>已确认两份记录来自同一受试者，且 A、B 的镇痛前后标签正确</label><p class="muted small">图中时间为干净片段拼接后的相对时间，不用于判断宫缩是否同步。变化量统一为 B−A，不代表镇痛的因果作用。</p><button class="primary run" type="submit">分析两份文件并对比</button><div id="pairStatus" class="status" role="status"></div></form></div>
-<div id="pairControls" class="card hide"><div class="row"><div class="grow"><label for="pairChannel">时域/时频图使用的共同通道</label><select id="pairChannel"></select></div><button id="pairRedraw" class="secondary run" type="button">切换通道重新绘图</button></div><p class="muted small">直接复用这两份记录的本机缓存，无需重新上传。网络与汇总特征始终使用全部共同通道。</p></div><div id="pairResult" class="result hide"></div></section>
+      <section id="session" class="tab-panel hide" role="tabpanel">
+        <div class="card">
+          <h2>按时间顺序合并多份 data</h2>
+          <p class="muted">
+            同一产妇、同一次记录。第1、2、3…段仅表示时间先后，不填写状态标签。所有 data 共用一份
+            evt.bdf。
+          </p>
+          <form id="batchForm">
+            <fieldset class="format-choice">
+              <legend>EEG文件格式（必须且只能勾选一种）</legend>
+              <label class="check"
+                ><input type="radio" name="batchFormat" value="bdf" checked />BDF（data.bdf）</label
+              ><label class="check"
+                ><input type="radio" name="batchFormat" value="fif" />FIF（fdata.fif）</label
+              >
+              <p class="muted small">
+                切换格式会清空本入口的已选脑电；evt.bdf 与 JSON
+                不属于EEG格式选择。FIF按已保存的坏道/BAD标记排除；保留当前特征分析的带通与陷波设置。
+              </p>
+            </fieldset>
+            <div class="advanced folder-import">
+              <h3>从记录文件夹自动导入</h3>
+              <label for="batchFolder">选择姓名编号记录文件夹，或包含多次记录的上层目录</label
+              ><input id="batchFolder" type="file" webkitdirectory directory multiple />
+              <p class="muted small">
+                按勾选格式识别数字子文件夹里的 data.bdf 或 fdata.fif（仅选中一种）；同次记录的
+                evt.bdf、datainfo.json、RecordInfo.json
+                自动填入。选择上层目录时，先选定其中一次记录。此步骤只整理候选文件，不自动开始分析。
+              </p>
+              <div id="batchFolderChoices" class="hide">
+                <label for="batchFolderSearch">按编号、姓名或记录时间筛选</label
+                ><input
+                  id="batchFolderSearch"
+                  type="search"
+                  placeholder="例如：002 姓名 12_23"
+                /><label for="batchFolderRecord">选择本次记录（选中后自动填入下方）</label
+                ><select id="batchFolderRecord">
+                  <option value="">请选择一次记录</option></select
+                ><button id="batchFolderReload" type="button" class="secondary">
+                  重新载入此记录
+                </button>
+              </div>
+              <div id="batchFolderStatus" class="status" role="status"></div>
+              <p class="muted small">
+                自动填入后仍可逐份添加、移除或调整顺序，也可手动替换evt和JSON。每次载入文件夹会替换当前队列与辅助文件；各次记录分别处理。
+              </p>
+            </div>
+            <div class="advanced">
+              <h3>JSON 元数据辅助（可选）</h3>
+              <div class="two-col">
+                <div>
+                  <label for="batchDataInfo">datainfo.json：自动生成分段时间表</label
+                  ><input id="batchDataInfo" type="file" accept=".json" />
+                </div>
+                <div>
+                  <label for="batchRecordInfo">RecordInfo.json：核对通道类型</label
+                  ><input id="batchRecordInfo" type="file" accept=".json" />
+                </div>
+              </div>
+              <p class="muted small">
+                选中后先生成安全预览。datainfo
+                自动按“有波形时长”的条目设置份数，可手动改为子集；不会覆盖 BDF 时间。RecordInfo
+                仅提取通道配置，不展示或保存身份和摄像头凭据。
+              </p>
+              <button id="batchClearMetadata" type="button" class="secondary">
+                清除 JSON 辅助
+              </button>
+              <div id="batchMetadataStatus" class="status" role="status"></div>
+              <div id="batchMetadataPreview"></div>
+            </div>
+            <label for="batchCount">本次分析份数（2–30）</label
+            ><input id="batchCount" type="number" min="2" max="30" value="2" required />
+            <label for="batchFiles">逐份添加 data.bdf（也可一次选择多份，再调整顺序）</label
+            ><input id="batchFiles" type="file" accept=".bdf" multiple />
+            <p id="batchQueueInfo" class="muted small">已添加 0 / 2 份</p>
+            <div id="batchQueue"></div>
+            <button id="batchSort" class="secondary" type="button">按文件头时间排序</button>
+            <label for="batchEvt">本组唯一对应的 evt.bdf</label
+            ><input id="batchEvt" type="file" accept=".bdf" required />
+            <div class="grid settings">
+              <div>
+                <label for="batchFs">统一目标采样率（Hz）</label
+                ><input id="batchFs" type="number" min="100" max="2000" value="250" required />
+              </div>
+              <div>
+                <label for="batchNotch">统一工频陷波</label
+                ><select id="batchNotch">
+                  <option value="50">50 / 100 Hz</option>
+                  <option value="60">60 / 120 Hz</option>
+                  <option value="none">关闭</option>
+                </select>
+              </div>
+              <div>
+                <label for="batchEpoch">质控片段长度（s）</label
+                ><input id="batchEpoch" type="number" min="1" max="60" value="2" required />
+              </div>
+              <div>
+                <label for="batchEvtOffset">evt 额外时钟校正（s，默认0）</label
+                ><input
+                  id="batchEvtOffset"
+                  type="number"
+                  min="-86400"
+                  max="86400"
+                  step="0.001"
+                  value="0"
+                  required
+                />
+              </div>
+            </div>
+            <label class="check"
+              ><input
+                id="batchSkipEmpty"
+                type="checkbox"
+                checked
+              />质控失败段保留显示：时间位置＋失败原因＋原始波形（不纳入特征汇总）</label
+            >
+            <label class="check"
+              ><input id="batchConfirm" type="checkbox" required />已核对所有 data
+              来自同一产妇的同一次记录，且下列顺序为时间先后</label
+            >
+            <div class="notice subtle">
+              真实间隔保留在事件映射中，不补零或擅自裁剪重叠。各文件的连续保留段分别滤波/计算，再按有效时长汇总；不跨文件边界计算相位或时频。单组上传总量最多2
+              GB，超过内存或连续段限额会明确提示。
+            </div>
+            <button class="primary run" type="submit">分析本组 data 与同一 evt</button>
+            <div id="batchStatus" class="status" role="status"></div>
+          </form>
+        </div>
+        <div id="batchResult" class="result hide"></div>
+      </section>
+      <section id="pair" class="tab-panel hide" role="tabpanel">
+        <div class="card">
+          <h2>同一受试者的镇痛前后对比</h2>
+          <p class="muted">
+            选择前后两份 <b>data.bdf</b> 或其他 EEG
+            波形文件。以共同质控通道、相同有效时长重新计算，统一图表尺度。
+          </p>
+          <form id="pairForm">
+            <fieldset class="format-choice">
+              <legend>EEG文件格式（必须且只能勾选一种）</legend>
+              <label class="check"
+                ><input type="radio" name="pairFormat" value="bdf" checked />BDF（data.bdf）</label
+              ><label class="check"
+                ><input type="radio" name="pairFormat" value="fif" />FIF（fdata.fif）</label
+              >
+              <p class="muted small">
+                切换格式会清空本入口的已选脑电；evt.bdf 与 JSON
+                不属于EEG格式选择。FIF按已保存的坏道/BAD标记排除；保留当前特征分析的带通与陷波设置。
+              </p>
+            </fieldset>
+            <div class="two-col">
+              <div>
+                <label for="pairFileA">A：镇痛前 EEG</label
+                ><input id="pairFileA" type="file" accept=".bdf" required /><label for="pairLabelA"
+                  >记录 A 标签</label
+                ><input id="pairLabelA" type="text" value="镇痛前" maxlength="30" required />
+              </div>
+              <div>
+                <label for="pairFileB">B：镇痛后 EEG</label
+                ><input id="pairFileB" type="file" accept=".bdf" required /><label for="pairLabelB"
+                  >记录 B 标签</label
+                ><input id="pairLabelB" type="text" value="镇痛后" maxlength="30" required />
+              </div>
+            </div>
+            <div class="grid settings">
+              <div>
+                <label for="pairFs">统一采样率（Hz）</label
+                ><input id="pairFs" type="number" min="100" max="2000" value="250" required />
+              </div>
+              <div>
+                <label for="pairNotch">统一工频陷波</label
+                ><select id="pairNotch">
+                  <option value="50">50 / 100 Hz</option>
+                  <option value="60">60 / 120 Hz</option>
+                  <option value="none">关闭</option>
+                </select>
+              </div>
+              <div>
+                <label for="pairEpoch">片段长度（s）</label
+                ><input id="pairEpoch" type="number" min="1" max="60" value="2" required />
+              </div>
+              <div>
+                <label for="pairSeconds">每份最多对比有效时长（s）</label
+                ><input id="pairSeconds" type="number" min="2" max="600" value="180" required />
+              </div>
+            </div>
+            <label class="check"
+              ><input id="pairConfirm" type="checkbox" required />已确认两份记录来自同一受试者，且
+              A、B 的镇痛前后标签正确</label
+            >
+            <p class="muted small">
+              图中时间为干净片段拼接后的相对时间，不用于判断宫缩是否同步。变化量统一为
+              B−A，不代表镇痛的因果作用。
+            </p>
+            <div class="advanced">
+              <label class="check"
+                ><input id="pairUseEvt" type="checkbox" />使用 evt.bdf 事件标记（可选）</label
+              >
+              <div id="pairEvtOptions" class="hide">
+                <div class="two-col">
+                  <div>
+                    <label for="pairEvtA">A 记录对应 evt.bdf</label
+                    ><input id="pairEvtA" type="file" accept=".bdf" disabled /><label
+                      for="pairEvtOffsetA"
+                      >额外校正偏移（秒，默认 0）</label
+                    ><input
+                      id="pairEvtOffsetA"
+                      type="number"
+                      step="0.001"
+                      min="-86400"
+                      max="86400"
+                      value="0"
+                      disabled
+                    />
+                  </div>
+                  <div>
+                    <label for="pairEvtB">B 记录对应 evt.bdf</label
+                    ><input id="pairEvtB" type="file" accept=".bdf" disabled /><label
+                      for="pairEvtOffsetB"
+                      >额外校正偏移（秒，默认 0）</label
+                    ><input
+                      id="pairEvtOffsetB"
+                      type="number"
+                      step="0.001"
+                      min="-86400"
+                      max="86400"
+                      value="0"
+                      disabled
+                    />
+                  </div>
+                </div>
+                <p class="muted small">
+                  A、B
+                  分别选择对应记录的事件文件，至少选择一份。按文件头时间对齐，保留原始标签；事件文件可覆盖整次记录，落在当前片段外的事件会单独列出。偏移仅在已确认时钟差后填写，不自动判断宫缩或镇痛含义。
+                </p>
+              </div>
+            </div>
+            <button class="primary run" type="submit">分析两份文件并对比</button>
+            <div id="pairStatus" class="status" role="status"></div>
+          </form>
+        </div>
+        <div id="pairControls" class="card hide">
+          <div class="row">
+            <div class="grow">
+              <label for="pairChannel">时域/时频图使用的共同通道</label
+              ><select id="pairChannel"></select>
+            </div>
+            <button id="pairRedraw" class="secondary run" type="button">切换通道重新绘图</button>
+          </div>
+          <p class="muted small">
+            直接复用这两份记录的本机缓存，无需重新上传。网络与汇总特征始终使用全部共同通道。
+          </p>
+        </div>
+        <div id="pairResult" class="result hide"></div>
+      </section>
 
-<section id="spike" class="tab-panel hide" role="tabpanel"><div class="card"><h2>设备 spike 计数与候选波形复核</h2><p class="muted">本数据集中的 <b>spike.bdf 是单通道、1 Hz、pcs 单位的设备计数</b>。仅该文件无法给出通道、脑区或后续慢波；添加同一记录段中的 <b>data.bdf</b> 后可进行候选波形分析。</p>
-<form id="spikeForm"><div class="two-col"><div><label for="spikeFile">spike.bdf（必选）</label><input id="spikeFile" type="file" accept=".bdf" required></div><div><label for="spikeEeg">同一记录段的 data.bdf（可选）</label><input id="spikeEeg" type="file" accept=".bdf"></div></div>
-<details class="advanced"><summary>候选检测设置（仅在添加原始 EEG 时生效）</summary><div class="grid"><div><label for="spikeScope">搜索范围</label><select id="spikeScope"><option value="marked">仅设备计数非零的秒区间</option><option value="all">全记录</option></select></div><div><label for="spikeThreshold">背景稳健尺度阈值</label><input id="spikeThreshold" type="number" min="3" max="20" step="0.5" value="6" required></div><div><label for="spikeScale">额外电压修正</label><select id="spikeScale"><option value="1">按文件头单位（×1）</option><option value="0.001">已确认 Pony nV 误标为 µV（×0.001）</option><option value="1000">已确认需 ×1000</option></select></div></div></details>
-<div class="notice subtle">单独流程保留原始时间轴，不使用常规 EEG 的伪迹片段删除。自动结果仅标为“候选”，需复核形态与伪迹；电极对应头皮区不等于脑内起源定位。</div><p class="muted small">候选检测使用 0.5–70 Hz 复核信号和 5–70 Hz 窄峰检测，后续慢波在峰后 80–500 ms 内按反向宽波规则筛查。<a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC8135051/" target="_blank" rel="noopener">ACNS 术语参考</a>；<a href="https://doi.org/10.1212/WNL.0000000000009439" target="_blank" rel="noopener">IFCN 形态判读研究</a>。本算法尚未经过本队列专家标签验证。</p>
-<button class="primary run" type="submit">开始 spike 独立分析</button><div id="spikeStatus" class="status" role="status"></div></form></div><div id="spikeResult" class="result hide"></div></section>
-<footer>结果保存在本机 results/eeg_web_output。单文件最大 2 GB；分析时请保持页面打开。</footer></main>
-<div id="imageViewer" class="viewer hide" aria-modal="true" role="dialog" aria-label="图表放大查看"><button id="viewerClose" type="button">关闭 ✕</button><img id="viewerImage" alt=""><div id="viewerCaption"></div></div>
-<script src="/assets/eeg_app.js"></script></body></html>
+      <section id="spike" class="tab-panel hide" role="tabpanel">
+        <div class="card">
+          <h2>设备 spike 计数与候选波形复核</h2>
+          <p class="muted">
+            本数据集中的
+            <b>spike.bdf 是单通道、1 Hz、pcs 单位的设备计数</b
+            >。仅该文件无法给出通道、脑区或后续慢波；添加同一记录段中的
+            <b>data.bdf</b> 后可进行候选波形分析。
+          </p>
+          <form id="spikeForm">
+            <div class="two-col">
+              <div>
+                <label for="spikeFile">spike.bdf（必选）</label
+                ><input id="spikeFile" type="file" accept=".bdf" required />
+              </div>
+              <div>
+                <label for="spikeEeg">同一记录段的 data.bdf（可选）</label
+                ><input id="spikeEeg" type="file" accept=".bdf" />
+              </div>
+            </div>
+            <details class="advanced">
+              <summary>候选检测设置（仅在添加原始 EEG 时生效）</summary>
+              <div class="grid">
+                <div>
+                  <label for="spikeScope">搜索范围</label
+                  ><select id="spikeScope">
+                    <option value="marked">仅设备计数非零的秒区间</option>
+                    <option value="all">全记录</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="spikeThreshold">背景稳健尺度阈值</label
+                  ><input
+                    id="spikeThreshold"
+                    type="number"
+                    min="3"
+                    max="20"
+                    step="0.5"
+                    value="6"
+                    required
+                  />
+                </div>
+                <div>
+                  <label for="spikeScale">额外电压修正</label
+                  ><select id="spikeScale">
+                    <option value="1">按文件头单位（×1）</option>
+                    <option value="0.001">已确认 Pony nV 误标为 µV（×0.001）</option>
+                    <option value="1000">已确认需 ×1000</option>
+                  </select>
+                </div>
+              </div>
+            </details>
+            <div class="notice subtle">
+              单独流程保留原始时间轴，不使用常规 EEG
+              的伪迹片段删除。自动结果仅标为“候选”，需复核形态与伪迹；电极对应头皮区不等于脑内起源定位。
+            </div>
+            <p class="muted small">
+              候选检测使用 0.5–70 Hz 复核信号和 5–70 Hz 窄峰检测，后续慢波在峰后 80–500 ms
+              内按反向宽波规则筛查。<a
+                href="https://pmc.ncbi.nlm.nih.gov/articles/PMC8135051/"
+                target="_blank"
+                rel="noopener"
+                >ACNS 术语参考</a
+              >；<a
+                href="https://doi.org/10.1212/WNL.0000000000009439"
+                target="_blank"
+                rel="noopener"
+                >IFCN 形态判读研究</a
+              >。本算法尚未经过本队列专家标签验证。
+            </p>
+            <div class="advanced">
+              <label class="check"
+                ><input id="spikeUseEvt" type="checkbox" />使用 evt.bdf 事件标记（可选）</label
+              >
+              <div id="spikeEvtOptions" class="hide">
+                <div class="two-col">
+                  <div>
+                    <label for="spikeEvt">配套 evt.bdf</label
+                    ><input id="spikeEvt" type="file" accept=".bdf" disabled /><label
+                      for="spikeEvtOffset"
+                      >额外校正偏移（秒，默认 0）</label
+                    ><input
+                      id="spikeEvtOffset"
+                      type="number"
+                      step="0.001"
+                      min="-86400"
+                      max="86400"
+                      value="0"
+                      disabled
+                    />
+                  </div>
+                </div>
+                <p class="muted small">
+                  按文件头时间对齐，保留原始标签；事件文件可覆盖整次记录，落在当前片段外的事件会单独列出。偏移仅在已确认时钟差后填写，不自动判断宫缩或镇痛含义。
+                </p>
+              </div>
+            </div>
+            <button class="primary run" type="submit">开始 spike 独立分析</button>
+            <div id="spikeStatus" class="status" role="status"></div>
+          </form>
+        </div>
+        <div id="spikeResult" class="result hide"></div>
+      </section>
+      <section id="rawqc" class="tab-panel hide" role="tabpanel">
+        <div class="card">
+          <h2>原始 BDF 质控与 FIF 导出</h2>
+          <div class="notice">
+            独立流程：不施加滤波、陷波、重采样、重参考或自动删道删段。保留采集文件中全部信号与样本，坏道和坏段仅作为元数据标记。上方“特征计算方案”不影响这里。
+          </div>
+          <form id="rawQcForm">
+            <div class="two-col">
+              <div>
+                <label for="rawQcFile">原始 .bdf</label
+                ><input id="rawQcFile" type="file" accept=".bdf" /><button
+                  id="rawQcLocalPick"
+                  class="secondary run"
+                  type="button"
+                >
+                  从本机选择BDF（同目录保存fdata.fif）
+                </button>
+              </div>
+              <div>
+                <label for="rawQcRecord">RecordInfo.json（可选，核对通道类型）</label
+                ><input id="rawQcRecord" type="file" accept=".json" />
+              </div>
+            </div>
+            <label for="rawQcSourcePath"
+              >源BDF完整路径（本机选择后自动填写；普通上传需补填才能同目录保存）</label
+            ><input id="rawQcSourcePath" type="text" placeholder="例如 E:\记录\1\data.bdf" />
+            <p class="notice small">
+              FIF保存为源BDF同目录的 fdata.fif；已有同名导出先备份到
+              .fdata_versions。混合采样率的其余组另存 fdata_groupN.fif，保留原采样率。
+            </p>
+            <div class="grid settings">
+              <div>
+                <label for="rawQcWelch">Welch 窗长（秒，仅用于PSD估计）</label
+                ><input
+                  id="rawQcWelch"
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="0.5"
+                  value="4"
+                  required
+                />
+              </div>
+              <div>
+                <label for="rawQcSegment">质控汇总段长（秒，不裁剪FIF）</label
+                ><input id="rawQcSegment" type="number" min="1" max="3600" value="30" required />
+              </div>
+            </div>
+            <details class="advanced" open>
+              <summary>人工标记与电极装配（可以先留空，检视后再生成新版本）</summary>
+              <p id="rawQcAutoDraftNotice" class="notice small hide" role="status"></p>
+              <label for="rawQcBads"
+                >坏道草稿（请人工核对，可增删）：原始通道名，逗号或换行分隔</label
+              ><textarea id="rawQcBads" rows="2" placeholder="例如 Fp1, Fp2"></textarea>
+              <label for="rawQcBadSegments"
+                >坏段草稿（请人工核对，可增删）：每行“开始秒,结束秒,原因”</label
+              ><textarea
+                id="rawQcBadSegments"
+                rows="3"
+                placeholder="例如 12,18,movement"
+              ></textarea>
+              <label for="rawQcEyes">已确认的眼状态：每行“开始秒,结束秒,open或closed”</label
+              ><textarea
+                id="rawQcEyes"
+                rows="3"
+                placeholder="示例格式（请按实际时间填写）：&#10;0,30,open&#10;40,70,closed"
+              ></textarea>
+              <p class="muted small">
+                时间均相对本BDF首样本；状态区间不能重叠。没有可靠状态信息时留空，仅输出枕区PSD；不猜测evt编码。α比较不使用人工坏道或BAD时段。
+              </p>
+              <label for="rawQcMapping"
+                >手动装配（可选）：每行“原始名,MNE类型,标准模板名”；第三项留空表示不装配坐标</label
+              ><textarea
+                id="rawQcMapping"
+                rows="3"
+                placeholder="仅在已确认导联时填写，例如：&#10;EEG1,eeg,Fp1&#10;X1,misc,"
+              ></textarea>
+              <p class="muted small">
+                类型可选
+                eeg/eog/ecg/emg/misc/stim/resp。默认按通道名和RecordInfo映射，T1/T2等不强配；未知电压单位保留数值为misc。坐标为MNE标准10–20扩展模板，非个体实测。64导图另列为参考示意，不会补造实际通道。
+              </p>
+            </details>
+            <div class="row">
+              <button id="rawQcOpen" class="secondary run" type="button">
+                只载入BDF查看（不导出FIF）</button
+              ><button class="primary run" type="submit">读取原始BDF、质控并导出FIF</button
+              ><button id="rawQcRevise" class="secondary run" type="button" disabled>
+                应用当前标记，生成新版本FIF</button
+              ><button id="rawQcRestore" class="secondary run" type="button">
+                恢复已有结果，仅调整查看
+              </button>
+            </div>
+            <div id="rawQcStatus" class="status" role="status"></div>
+          </form>
+        </div>
+        <div id="rawQcInspector" class="card hide">
+          <h3>原始波形自适应检视</h3>
+          <p class="muted small">
+            按真实片段调节坐标，默认逐通道适配全部幅度；每行标出原始范围与显示中心。额区→枕区排序，辅助信号另组。滚轮缩放纵轴，Shift＋滚轮缩放时间，拖动波形左右平移时间，双击适配当前窗。全部操作只改变查看方式。
+          </p>
+          <div class="advanced">
+            <h3>辅助巡检：先找候选，再逐页复核</h3>
+            <p class="muted small">
+              扫描整份记录，把可疑的通道和时段集中出来；点击候选或概览格子跳到原始波形。自动规则可能漏检，灰色仅表示未触发，不表示正常。原数据和FIF保持原样。
+            </p>
+            <div class="grid">
+              <div>
+                <label for="patrolBin">扫描分窗（秒）</label
+                ><input id="patrolBin" type="number" min="1" max="120" value="2" />
+              </div>
+              <div>
+                <label for="patrolZ">相对异常阈值（小值更敏感）</label
+                ><input id="patrolZ" type="number" min="3" max="12" value="6" />
+              </div>
+              <div>
+                <label for="patrolScope">扫描范围</label
+                ><select id="patrolScope">
+                  <option value="eeg">EEG候选通道（含未定位EEG）</option>
+                  <option value="all">全部信号（含辅助/参考）</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <button id="patrolAutoRed" type="button" class="warning-button run">
+                黄色按钮：自动红标并定位可疑通道/波形</button
+              ><button
+                id="patrolFillDraft"
+                type="button"
+                class="success-button run"
+                data-requires-result
+                data-ready="false"
+                disabled
+              >
+                绿色按钮：填入人工标记草稿</button
+              ><button id="patrolScan" type="button" class="secondary run">
+                扫描全记录，生成候选定位</button
+              ><button id="patrolClearRed" type="button" class="secondary">清除候选红标</button>
+            </div>
+            <p class="muted small">
+              绿色按钮将本次全部扫描结果追加到上方草稿：持续性候选→坏道，短暂候选→坏段（导出时作用于全部通道）；保留已有内容，可手动增删，不填眼状态或电极映射，不自动导出。黄色按钮会扫描、红色提示并跳到首个候选，同时显示对应频域；红色候选不是已确认坏道。人工确认前不写BAD，不删数据。
+            </p>
+            <div id="patrolStatus" class="status" role="status"></div>
+            <p id="patrolCoverage" class="notice small">尚未登记人工复核；自动翻窗不计入进度。</p>
+            <div id="patrolResults" class="hide">
+              <details open>
+                <summary>全记录 × 通道概览（点格子定位）</summary>
+                <div class="patrol-map">
+                  <canvas
+                    id="patrolMap"
+                    role="img"
+                    aria-label="伪迹候选定位概览，灰色未触发不代表正常"
+                  ></canvas>
+                </div>
+                <p class="muted small">
+                  灰色＝未触发规则；橙红＝候选；蓝框＝人工已覆盖；浅蓝框＝仅部分覆盖。候选与人工进度分开记录。
+                </p>
+              </details>
+              <label for="patrolFilter">候选列表</label
+              ><select id="patrolFilter">
+                <option value="all">全部候选（短暂异常优先）</option>
+                <option value="transient">仅短暂异常</option>
+                <option value="persistent">仅持续性通道问题</option>
+              </select>
+              <div class="row">
+                <button id="patrolPrevCandidate" type="button" class="secondary run">
+                  上一个候选</button
+                ><button id="patrolNextCandidate" type="button" class="secondary run">
+                  下一个候选
+                </button>
+              </div>
+              <div id="patrolCandidates" class="patrol-candidates"></div>
+              <div id="patrolDownloads" class="downloads"></div>
+              <details>
+                <summary>候选规则与解释边界</summary>
+                <div id="patrolRules"></div>
+              </details>
+            </div>
+          </div>
+          <div class="grid settings">
+            <div>
+              <label for="rawYMode">纵轴模式</label
+              ><select id="rawYMode">
+                <option value="channel">逐通道自适应（看形态）</option>
+                <option value="shared">同单位统一自适应（比振幅）</option>
+                <option value="fixed">手动电压标尺（默认100 µV/格）</option>
+              </select>
+            </div>
+            <div>
+              <label for="rawWaveStep">手动电压标尺（µV/格）</label
+              ><input
+                id="rawWaveStep"
+                type="number"
+                min="0.000001"
+                step="any"
+                value="100"
+                disabled
+              />
+            </div>
+            <div>
+              <label for="rawWaveGain">纵轴缩放倍数（1倍适配）</label
+              ><input id="rawWaveGain" type="number" min="0.001" max="100" step="0.1" value="1" />
+            </div>
+          </div>
+          <p id="rawScaleNotice" class="notice small">
+            逐通道刻度不同，图上高度不能直接比较；请看数值标尺或切换统一尺度。原始平线不会被变成波动。
+          </p>
+          <div class="grid settings">
+            <div>
+              <label for="rawWaveStart">起点（秒）</label
+              ><input id="rawWaveStart" type="number" min="0" step="any" value="0" />
+            </div>
+            <div>
+              <label for="rawWaveSeconds">窗长（秒，最多整份记录）</label
+              ><input id="rawWaveSeconds" type="number" min="0.01" step="any" value="10" />
+            </div>
+            <div>
+              <label for="rawTimePreset">时间窗快捷选择</label
+              ><select id="rawTimePreset">
+                <option value="auto">自动建议窗长</option>
+                <option value="0.1">0.1秒</option>
+                <option value="0.5">0.5秒</option>
+                <option value="1">1秒</option>
+                <option value="2">2秒</option>
+                <option value="5">5秒</option>
+                <option value="10">10秒</option>
+                <option value="60">60秒</option>
+                <option value="all">整份记录概览</option>
+              </select>
+            </div>
+            <div>
+              <label for="rawWaveFocus">显示布局</label
+              ><select id="rawWaveFocus">
+                <option value="">所选多通道堆叠</option>
+              </select>
+            </div>
+          </div>
+          <details>
+            <summary>选择显示通道；右侧按钮可将其标为/取消坏道</summary>
+            <div id="rawWaveChannels" class="raw-channel-list"></div>
+          </details>
+          <div class="advanced">
+            <div class="grid">
+              <div>
+                <label for="patrolPageSize">每页通道数</label
+                ><select id="patrolPageSize">
+                  <option value="4">4通道（推荐）</option>
+                  <option value="8">8通道</option>
+                  <option value="16">16通道</option>
+                  <option value="64">全部所选</option>
+                </select>
+              </div>
+              <div>
+                <label for="patrolWindow">巡查时间窗（秒）</label
+                ><input id="patrolWindow" type="number" min="0.1" max="60" value="4" />
+              </div>
+              <div>
+                <label for="patrolDelay">自动翻页间隔（秒）</label
+                ><input id="patrolDelay" type="number" min="2" max="30" value="5" />
+              </div>
+            </div>
+            <div class="row">
+              <button id="patrolPagePrev" class="secondary" type="button">上一组通道</button
+              ><button id="patrolPageNext" class="secondary" type="button">下一组通道</button
+              ><button id="patrolAdvance" class="secondary run" type="button">下一巡查页</button
+              ><button id="patrolPlay" class="secondary" type="button">开始自动翻页</button
+              ><button id="patrolPause" class="secondary" type="button">暂停</button>
+            </div>
+            <p id="patrolPageInfo" class="muted small"></p>
+            <div class="row">
+              <button id="patrolReviewed" class="secondary run" type="button">本页已复核</button
+              ><button id="patrolUncertain" class="secondary run" type="button">本页需再看</button
+              ><button id="patrolReviewNext" class="secondary run" type="button">
+                已复核并下一页</button
+              ><button id="patrolUndo" class="secondary run" type="button">撤销上次复核登记</button
+              ><button id="patrolReviewExport" class="secondary run" type="button">
+                导出人工复核进度
+              </button>
+            </div>
+          </div>
+          <div class="row">
+            <button id="rawWavePrev" class="secondary run" type="button">上一窗</button
+            ><button id="rawWaveLoad" class="secondary run" type="button">读取此窗</button
+            ><button id="rawWaveNext" class="secondary run" type="button">下一窗</button
+            ><button id="rawWaveFit" class="secondary" type="button">纵轴适配当前窗</button
+            ><button id="rawShowPsd" class="secondary run" type="button">查看频域 PSD</button
+            ><button id="rawWaveMark" class="secondary run" type="button">
+              把当前时间窗加入全通道坏段草稿</button
+            ><button id="rawWaveExport" class="secondary run" type="button">只导出当前视图</button>
+          </div>
+          <p id="rawWaveInfo" class="muted small"></p>
+          <div class="raw-wave-scroll">
+            <canvas
+              id="rawWaveCanvas"
+              aria-label="原始脑电自适应波形，仅调节横纵坐标"
+              role="img"
+            ></canvas>
+          </div>
+          <details>
+            <summary>当前时间窗数值与纵轴参数</summary>
+            <div id="rawWaveStats"></div>
+          </details>
+          <div id="rawViewDownloads" class="downloads"></div>
+          <details id="rawPsdPanel" class="advanced" open>
+            <summary>频域检视：原始信号 Welch PSD</summary>
+            <p class="muted small">
+              查看当前原始窗口或整份记录的频谱，包含坏道/坏段，不滤波、不陷波。50/60
+              Hz虚线便于核对工频；红色曲线只表示程序候选，人工BAD另有标记。不同单位分图。
+            </p>
+            <div class="grid">
+              <div>
+                <label for="rawPsdChannels">频域通道</label
+                ><select id="rawPsdChannels">
+                  <option value="visible">当前显示的通道页/单通道</option>
+                  <option value="eeg">全部EEG候选通道</option>
+                  <option value="all">全部信号（分单位）</option>
+                </select>
+              </div>
+              <div>
+                <label for="rawPsdScope">频域时间范围</label
+                ><select id="rawPsdScope">
+                  <option value="window">当前波形时间窗</option>
+                  <option value="full">整份记录</option>
+                </select>
+              </div>
+              <div>
+                <label for="rawPsdWindow">Welch设定窗长（秒）</label
+                ><input id="rawPsdWindow" type="number" min="0.25" max="10" step="0.25" value="4" />
+              </div>
+              <div>
+                <label for="rawPsdY">功率显示</label
+                ><select id="rawPsdY">
+                  <option value="db">dB功率</option>
+                  <option value="linear">线性功率</option>
+                </select>
+              </div>
+              <div>
+                <label for="rawPsdMin">频率下限（Hz）</label
+                ><input id="rawPsdMin" type="number" min="0" step="0.25" value="0.5" />
+              </div>
+              <div>
+                <label for="rawPsdMax">频率上限（Hz）</label
+                ><input id="rawPsdMax" type="number" min="0.25" step="1" value="100" />
+              </div>
+            </div>
+            <label class="check"
+              ><input
+                id="rawPsdFollow"
+                type="checkbox"
+                checked
+              />频域跟随当前原始时间窗（整份记录模式不随时间重算）</label
+            >
+            <div class="row">
+              <button id="rawPsdLoad" class="secondary run" type="button">读取/更新频域</button
+              ><button id="rawPsdExport" class="secondary run" type="button">
+                导出当前PSD数值
+              </button>
+            </div>
+            <p id="rawPsdInfo" class="muted small">
+              尚未读取频域。可先点击黄色按钮自动定位并查看对应PSD。
+            </p>
+            <div id="rawPsdCharts"></div>
+            <div id="rawPsdTable"></div>
+            <div id="rawPsdDownloads" class="downloads"></div>
+          </details>
+          <p class="muted small">
+            “本页已复核”只登记浏览进度。坏段草稿在FIF导出时作用于全部通道，请按实际复核结果决定；不会根据候选自动添加。标记先写入上方草稿。点击“应用当前标记，生成新版本FIF”后才写入新文件；同目录fdata.fif先备份再更新，历史版本保留。
+          </p>
+        </div>
+        <div id="rawQcResult" class="result hide"></div>
+      </section>
+      <footer>
+        结果保存在本机 results/eeg_web_output。单文件最大 2 GB；分析时请保持页面打开。
+      </footer>
+    </main>
+    <div
+      id="imageViewer"
+      class="viewer hide"
+      aria-modal="true"
+      role="dialog"
+      aria-label="图表放大查看"
+    >
+      <button id="viewerClose" type="button">关闭 ✕</button><img id="viewerImage" alt="" />
+      <div id="viewerCaption"></div>
+      <span class="viewer-help">滚轮缩放 · 拖动平移 · 双击恢复 · Esc关闭</span>
+    </div>
+    <script src="/assets/eeg_folder_import.js"></script>
+    <script src="/assets/eeg_ui_common.js"></script>
+    <script src="/assets/eeg_events_ui.js"></script>
+    <script src="/assets/eeg_single_analysis.js"></script>
+    <script src="/assets/eeg_pair_analysis.js"></script>
+    <script src="/assets/eeg_spike_ui.js"></script>
+    <script src="/assets/eeg_session_ui.js"></script>
+    <script src="/assets/eeg_result_explainer.js"></script>
+    <script src="/assets/eeg_app.js"></script>
+    <script src="/assets/eeg_view_axes.js"></script>
+    <script src="/assets/eeg_patrol_math.js"></script>
+    <script src="/assets/eeg_raw_qc.js"></script>
+    <script src="/assets/eeg_artifact_patrol.js"></script>
+    <script src="/assets/eeg_view_spectrum.js"></script>
+  </body>
+</html>

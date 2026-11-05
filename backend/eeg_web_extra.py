@@ -1,4 +1,7 @@
-"""配对比较和 spike 入口的本机 HTTP 路由。"""
+"""扩展HTTP接口：上传、事件、多份、对比等请求在这里转交到对应功能模块。
+
+配对比较和 spike 入口的本机 HTTP 路由。"""
+
 from datetime import datetime
 from pathlib import Path
 import json
@@ -7,98 +10,311 @@ import uuid
 from urllib.parse import parse_qs, quote, urlparse
 from eeg_pair_spike import analyze_spike, compare_cached, read_spike_counts
 from eeg_feature_engine import PIPELINE_VERSION
+from eeg_events import analyze_events, read_event_file
+from eeg_session import analyze_session
+from eeg_feature_engine import AnalysisSettings
+from eeg_metadata import decode_metadata, MAX_JSON_BYTES
 
-PUBLIC_SUFFIXES={'.png','.csv','.xlsx','.txt'}
+PUBLIC_SUFFIXES = {".png", ".csv", ".xlsx", ".txt", ".html", ".fif"}
 
 
 def public_files(paths, run_id):
-    result=[]
+    """把允许下载的结果变成网页链接。原始BDF和含私人路径的配置不在下载名单里。"""
+    result = []
     for item in paths:
-        path=Path(item)
+        path = Path(item)
         if path.is_file() and path.suffix.lower() in PUBLIC_SUFFIXES:
-            result.append({'name':path.name,'label':path.name,'url':f'/download/{run_id}/{quote(path.name)}',
-                'preview_url':f'/preview/{run_id}/{quote(path.name)}' if path.suffix.lower()=='.png' else None})
+            result.append(
+                {
+                    "name": path.name,
+                    "label": path.name,
+                    "url": f"/download/{run_id}/{quote(path.name)}",
+                    "preview_url": (
+                        f"/preview/{run_id}/{quote(path.name)}"
+                        if path.suffix.lower() == ".png"
+                        else None
+                    ),
+                }
+            )
     return result
 
 
 def new_run(root):
-    run_id=datetime.now().strftime('%Y%m%d_%H%M%S_')+uuid.uuid4().hex[:8]
-    run=root/run_id;run.mkdir(parents=True,exist_ok=False)
-    return run_id,run
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+    run = root / run_id
+    run.mkdir(parents=True, exist_ok=False)
+    return run_id, run
+
+
+def pack_event_info(info, run_id):
+    if not info:
+        return None
+    return {**info, "files": public_files(info["files"], run_id)}
 
 
 def read_json(handler):
-    length=int(handler.headers.get('Content-Length','0'))
-    if not 0<length<65536:raise ValueError('请求参数过长或为空。')
-    return json.loads(handler.rfile.read(length).decode('utf-8'))
+    """把网页发来的JSON参数读成Python字典，并限制请求大小；它不是脑电文件读取器。"""
+    length = int(handler.headers.get("Content-Length", "0"))
+    if not 0 < length < 65536:
+        raise ValueError("请求参数过长或为空。")
+    return json.loads(handler.rfile.read(length).decode("utf-8"))
 
 
-def run_manifest(root,run_id):
-    if not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,80}',run_id):raise ValueError('无效分析编号。')
-    path=root/run_id/'analysis_manifest.json'
-    if not path.is_file():raise ValueError('分析缓存不存在，请在对比入口重新选择两份文件。')
-    return json.loads(path.read_text(encoding='utf-8'))
+def run_manifest(root, run_id):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", run_id):
+        raise ValueError("无效分析编号。")
+    path = root / run_id / "analysis_manifest.json"
+    if not path.is_file():
+        raise ValueError("分析缓存不存在，请在对比入口重新选择两份文件。")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def upload_path(root,token):
-    if not isinstance(token,str) or not re.fullmatch(r'[a-f0-9]{32}',token):raise ValueError('无效上传编号。')
-    path=root/'_uploads'/f'{token}.bdf'
-    if not path.is_file():raise ValueError('上传文件已失效，请重新选择文件。')
+def upload_path(root, token, suffix=".bdf"):
+    if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+        raise ValueError("无效上传编号。")
+    if suffix not in (".bdf", ".fif", ".json"):
+        raise ValueError("不支持的临时文件类型。")
+    path = root / "_uploads" / f"{token}{suffix}"
+    if not path.is_file():
+        raise ValueError("上传文件已失效，请重新选择文件。")
     return path
 
 
-def handle_extra(handler,root):
-    parsed=urlparse(handler.path)
-    if parsed.path=='/api/upload':
-        length=int(handler.headers.get('Content-Length','0'))
-        if not 0<length<=2*1024**3:raise ValueError('文件为空或超过 2 GB。')
-        query=parse_qs(parsed.query);filename=query.get('filename',[''])[0]
-        if Path(filename).suffix.lower()!='.bdf':raise ValueError('棘波入口仅支持 .bdf 文件。')
-        kind=query.get('kind',['eeg'])[0]
-        if kind=='spike' and length>20*1024**2:raise ValueError('计数型 spike.bdf 超过 20 MB，请确认文件类型。')
-        folder=root/'_uploads';folder.mkdir(exist_ok=True)
-        token=uuid.uuid4().hex;path=folder/f'{token}.bdf'
+def handle_extra(handler, root):
+    """扩展接口分发。先看请求路径，再找到对应分析函数；不要在这里写特征公式。"""
+    parsed = urlparse(handler.path)
+    if parsed.path.startswith("/api/raw-qc"):
+        from eeg_raw_qc_api import handle_raw_qc
+
+        if handle_raw_qc(handler, root, parsed.path):
+            return True
+    if parsed.path == "/api/upload":
+        length = int(handler.headers.get("Content-Length", "0"))
+        if not 0 < length <= 2 * 1024**3:
+            raise ValueError("文件为空或超过 2 GB。")
+        query = parse_qs(parsed.query)
+        filename = query.get("filename", [""])[0]
+        kind = query.get("kind", ["eeg"])[0]
+        if kind in ("datainfo", "recordinfo"):
+            if Path(filename).suffix.lower() != ".json" or length > MAX_JSON_BYTES:
+                raise ValueError("元数据需要不超过2 MB的JSON文件。")
+            body = handler.rfile.read(length)
+            if len(body) != length:
+                raise ValueError("JSON上传中断。")
+            safe = decode_metadata(body, kind)
+            if query.get("preview", ["0"])[0] == "1":
+                handler.send_json(200, {"metadata": safe})
+                return True
+            folder = root / "_uploads"
+            folder.mkdir(exist_ok=True)
+            token = uuid.uuid4().hex
+            # Save only the allow-listed representation, never the raw camera/identity fields.
+            (folder / f"{token}.json").write_text(
+                json.dumps(safe, ensure_ascii=False), encoding="utf8"
+            )
+            handler.send_json(200, {"upload_id": token, "metadata": safe})
+            return True
+        suffix = Path(filename).suffix.lower()
+        if suffix not in ((".bdf", ".fif") if kind == "eeg" else (".bdf",)):
+            raise ValueError("EEG只支持BDF或FIF；evt/spike仍须BDF。")
+        if kind not in ("eeg", "spike", "evt"):
+            raise ValueError("未知辅助文件类型。")
+        if kind == "spike" and length > 20 * 1024**2:
+            raise ValueError("计数型 spike.bdf 超过 20 MB，请确认文件类型。")
+        if kind == "evt" and length > 20 * 1024**2:
+            raise ValueError("evt.bdf 超过 20 MB。")
+        folder = root / "_uploads"
+        folder.mkdir(exist_ok=True)
+        token = uuid.uuid4().hex
+        path = folder / f"{token}{suffix}"
         try:
-            with path.open('wb') as f:
-                remaining=length
+            with path.open("wb") as f:
+                remaining = length
                 while remaining:
-                    chunk=handler.rfile.read(min(1024**2,remaining))
-                    if not chunk:raise ValueError('文件上传中断。')
-                    f.write(chunk);remaining-=len(chunk)
-            if kind=='spike':read_spike_counts(path)
+                    chunk = handler.rfile.read(min(1024**2, remaining))
+                    if not chunk:
+                        raise ValueError("文件上传中断。")
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            if kind == "spike":
+                read_spike_counts(path)
+            if kind == "evt":
+                read_event_file(path)
         except Exception:
-            path.unlink(missing_ok=True);raise
-        handler.send_json(200,{'upload_id':token});return True
-    if parsed.path=='/api/compare':
-        opts=read_json(handler)
-        aa=run_manifest(root,opts.get('run_a'));bb=run_manifest(root,opts.get('run_b'))
-        if any(m.get('pipeline_version') != PIPELINE_VERSION for m in (aa,bb)):
-            raise ValueError('缓存来自旧版计算方法，请重新上传两份文件；不同方法版本不能混合比较。')
-        if aa.get('settings')!=bb.get('settings'):raise ValueError('两份记录的预处理设置不同，请在对比入口使用统一设置重新分析。')
-        if not aa.get('cache_path') or not bb.get('cache_path'):raise ValueError('记录缺少对比缓存，请从两份 EEG 对比入口重新上传。')
+            path.unlink(missing_ok=True)
+            raise
+        handler.send_json(200, {"upload_id": token})
+        return True
+    if parsed.path == "/api/fif-header":
+        opts = read_json(handler)
+        path = upload_path(root, opts.get("upload_id"), ".fif")
+        from eeg_fif import open_fif
+
+        raw = open_fif(path)
+        try:
+            # Header-only clock extraction also works for files whose EEG is all marked bad.
+            import re as _re
+
+            description = raw.info.get("description") or ""
+            match = _re.search(
+                r"original local clock \(timezone unverified\):\s*(\d{2}\.\d{2}\.\d{2})\s+(\d{2}\.\d{2}\.\d{2})",
+                description,
+            )
+            date = raw.info.get("meas_date")
+            day, time = (
+                (match[1], match[2])
+                if match
+                else (date.strftime("%d.%m.%y"), date.strftime("%H.%M.%S")) if date else ("", "")
+            )
+            handler.send_json(
+                200,
+                {
+                    "start_date": day,
+                    "start_time": time,
+                    "duration": raw.n_times / raw.info["sfreq"],
+                    "first_time": raw.first_time,
+                },
+            )
+        finally:
+            raw.close()
+            path.unlink(missing_ok=True)
+        return True
+    if parsed.path == "/api/compare":
+        opts = read_json(handler)
+        aa = run_manifest(root, opts.get("run_a"))
+        bb = run_manifest(root, opts.get("run_b"))
+        if any(m.get("pipeline_version") != PIPELINE_VERSION for m in (aa, bb)):
+            raise ValueError("缓存来自旧版计算方法，请重新上传两份文件；不同方法版本不能混合比较。")
+        if aa.get("header", {}).get("format") != bb.get("header", {}).get("format"):
+            raise ValueError("配对记录格式不同，禁止混合BDF和FIF；请重新选择同一种格式。")
+        if aa.get("settings") != bb.get("settings"):
+            raise ValueError("两份记录的预处理设置不同，请在对比入口使用统一设置重新分析。")
+        if not aa.get("cache_path") or not bb.get("cache_path"):
+            raise ValueError("记录缺少对比缓存，请从两份 EEG 对比入口重新上传。")
         # Cached paths are generated by this server, and must remain in their own run folders.
-        for manifest,rid in [(aa,opts['run_a']),(bb,opts['run_b'])]:
-            cache=Path(manifest['cache_path']).resolve()
-            if cache.parent!=(root/rid).resolve() or cache.name!='comparison_cache.npz':raise ValueError('缓存路径无效。')
-        seconds=float(opts.get('max_seconds',180))
-        if not 2<=seconds<=600:raise ValueError('对比时长需为 2–600 秒。')
-        label_a=str(opts.get('label_a','镇痛前'))[:30];label_b=str(opts.get('label_b','镇痛后'))[:30]
-        run_id,run=new_run(root)
-        result=compare_cached(aa['cache_path'],bb['cache_path'],run,label_a,label_b,opts.get('channel') or None,seconds)
-        result['files']=public_files(result['files'],run_id);result['run_id']=run_id
-        result['quality_a']=aa['preprocessed'];result['quality_b']=bb['preprocessed']
-        result['warnings']=['共同通道、相同有效时长重算；时频图固定同一通道、统一色标；PLV 色标为 0–1，差值色标为 −1–1。',
-            '对比时间是质控保留片段的拼接时间，不代表宫缩同步或原始连续时间。差值不证明镇痛的因果作用。']
-        handler.send_json(200,result);return True
-    if parsed.path=='/api/spike':
-        opts=read_json(handler);marker=upload_path(root,opts.get('spike_upload'));eeg=upload_path(root,opts['eeg_upload']) if opts.get('eeg_upload') else None
-        threshold=float(opts.get('threshold_z',6));scale=float(opts.get('amplitude_scale',1));scope=opts.get('scope','marked')
-        if not 3<=threshold<=20 or scale not in (1,.001,1000) or scope not in ('marked','all'):raise ValueError('棘波参数无效。')
-        run_id,run=new_run(root)
-        try:result=analyze_spike(marker,eeg,run,scope,threshold,scale)
+        for manifest, rid in [(aa, opts["run_a"]), (bb, opts["run_b"])]:
+            cache = Path(manifest["cache_path"]).resolve()
+            if cache.parent != (root / rid).resolve() or cache.name != "comparison_cache.npz":
+                raise ValueError("缓存路径无效。")
+        seconds = float(opts.get("max_seconds", 180))
+        if not 2 <= seconds <= 600:
+            raise ValueError("对比时长需为 2–600 秒。")
+        label_a = str(opts.get("label_a", "镇痛前"))[:30]
+        label_b = str(opts.get("label_b", "镇痛后"))[:30]
+        run_id, run = new_run(root)
+        result = compare_cached(
+            aa["cache_path"],
+            bb["cache_path"],
+            run,
+            label_a,
+            label_b,
+            opts.get("channel") or None,
+            seconds,
+        )
+        from eeg_montage import montage_mapping, export_montage
+
+        result["montage_info"] = montage_mapping(
+            result["labels"], included=result["labels"], scope="配对记录共同质控保留通道"
+        )
+        result["files"].extend(export_montage(result["montage_info"], run, "Montage_配对"))
+        result["files"] = public_files(result["files"], run_id)
+        result["run_id"] = run_id
+        result["quality_a"] = aa["preprocessed"]
+        result["quality_b"] = bb["preprocessed"]
+        result["event_info_a"] = pack_event_info(aa.get("event_info"), opts["run_a"])
+        result["event_info_b"] = pack_event_info(bb.get("event_info"), opts["run_b"])
+        result["warnings"] = result.get("warnings", []) + [
+            "共同通道、相同有效时长重算；时频图固定同一通道、统一色标；PLV 色标为 0–1，差值色标为 −1–1。",
+            "对比时间是质控保留片段的拼接时间，不代表宫缩同步或原始连续时间。差值不证明镇痛的因果作用。",
+        ]
+        handler.send_json(200, result)
+        return True
+    if parsed.path == "/api/session":
+        opts = read_json(handler)
+        items = opts.get("items")
+        if not isinstance(items, list) or not 2 <= len(items) <= 30:
+            raise ValueError("请按时间顺序选择 2–30 份 data.bdf。")
+        tokens = [item.get("upload_id") for item in items]
+        if len(set(tokens)) != len(tokens):
+            raise ValueError("上传编号重复，请重新上传。")
+        input_format = opts.get("input_format", "bdf")
+        if input_format not in ("bdf", "fif"):
+            raise ValueError("必须且只能选择一种EEG格式：BDF或FIF。")
+        paths = [upload_path(root, token, "." + input_format) for token in tokens]
+        evt = upload_path(root, opts.get("evt_upload"))
+        metadata_paths = []
+        metadata = {}
+        for kind in ("datainfo", "recordinfo"):
+            if opts.get(kind + "_upload"):
+                path = upload_path(root, opts[kind + "_upload"], suffix=".json")
+                safe = json.loads(path.read_text(encoding="utf8"))
+                if safe.get("kind") != kind:
+                    raise ValueError("JSON上传类型不匹配，请重新选择。")
+                metadata_paths.append(path)
+                metadata[kind] = safe
+        if not isinstance(opts.get("skip_empty", False), bool):
+            raise ValueError("跳过选项须为布尔值。")
+        config = opts.get("settings", {})
+        fs = float(config.get("target_fs", 250))
+        epoch = float(config.get("epoch_seconds", 2))
+        notch = config.get("notch", "50")
+        if not 100 <= fs <= 2000 or not 1 <= epoch <= 60 or notch not in ("50", "60", "none"):
+            raise ValueError("多份分析的采样率、片段长度或陷波设置无效。")
+        settings = AnalysisSettings(
+            target_fs=fs,
+            epoch_seconds=epoch,
+            notches=() if notch == "none" else (float(notch), float(notch) * 2),
+            feature_profile=config.get("feature_profile", "standard"),
+        )
+        run_id, run = new_run(root)
+        try:
+            result = analyze_session(
+                [{"path": p} for p in paths],
+                evt,
+                run,
+                settings,
+                opts.get("evt_offset", 0),
+                skip_empty=opts.get("skip_empty", False),
+                **metadata,
+            )
+        finally:
+            for path in set(paths + [evt] + metadata_paths):
+                path.unlink(missing_ok=True)
+        result["files"] = public_files(result["files"], run_id)
+        result["event_info"] = pack_event_info(result["event_info"], run_id)
+        result["run_id"] = run_id
+        handler.send_json(200, result)
+        return True
+    if parsed.path == "/api/spike":
+        opts = read_json(handler)
+        marker = upload_path(root, opts.get("spike_upload"))
+        eeg = upload_path(root, opts["eeg_upload"]) if opts.get("eeg_upload") else None
+        threshold = float(opts.get("threshold_z", 6))
+        scale = float(opts.get("amplitude_scale", 1))
+        scope = opts.get("scope", "marked")
+        if (
+            not 3 <= threshold <= 20
+            or scale not in (1, 0.001, 1000)
+            or scope not in ("marked", "all")
+        ):
+            raise ValueError("棘波参数无效。")
+        run_id, run = new_run(root)
+        evt = upload_path(root, opts["evt_upload"]) if opts.get("evt_upload") else None
+        try:
+            result = analyze_spike(marker, eeg, run, scope, threshold, scale)
+            reference = result.pop("recording_header")
+            if evt:
+                info = analyze_events(evt, reference, run, offset_seconds=opts.get("evt_offset", 0))
+                result["files"].extend(info["files"])
+                result["event_info"] = pack_event_info(info, run_id)
         finally:
             marker.unlink(missing_ok=True)
-            if eeg:eeg.unlink(missing_ok=True)
-        result['files']=public_files(result['files'],run_id);result['run_id']=run_id
-        handler.send_json(200,result);return True
+            if eeg:
+                eeg.unlink(missing_ok=True)
+            if evt:
+                evt.unlink(missing_ok=True)
+        result["files"] = public_files(result["files"], run_id)
+        result["run_id"] = run_id
+        handler.send_json(200, result)
+        return True
     return False

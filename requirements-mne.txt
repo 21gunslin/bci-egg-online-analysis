@@ -1,2 +1,2 @@
 -r requirements.txt
-mne>=1.8,<2
+# 兼容旧安装命令；MNE现已统一写在主requirements.txt中，避免两处版本范围不一致。

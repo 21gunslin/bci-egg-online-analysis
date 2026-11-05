@@ -1,0 +1,14 @@
+{
+  "name": "local-eeg-workbench-dev-tools",
+  "version": "0.11.0",
+  "private": true,
+  "description": "只用于代码排版和JavaScript测试；网页使用原生JavaScript，无需npm打包。",
+  "scripts": {
+    "format:web": "prettier --write web tests/*.cjs",
+    "check:web": "prettier --check web tests/*.cjs",
+    "test:web": "node --test tests/*.cjs"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.10"
+  }
+}
